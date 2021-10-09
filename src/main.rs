@@ -1,4 +1,5 @@
 use clap::{App, Arg, SubCommand};
+use server::Server;
 
 mod bridge;
 mod server;
@@ -55,15 +56,15 @@ async fn start_server<'a>(ports: &'a str, bridge: &'a str, threads: u32) {
         .map(|s| {
             let arr = s.trim().split(":").collect::<Vec<_>>();
             let src_port = arr[0].parse::<u32>().expect("cannot parse source port");
-            (
-                src_port,
-                arr.get(1)
-                    .map(|dest| dest.parse::<u32>().expect("cannot parse destination port"))
-                    .unwrap_or(src_port),
-            )
+            let dest_port = arr
+                .get(1)
+                .map(|dest| dest.parse::<u32>().expect("cannot parse destination port"))
+                .unwrap_or(src_port);
+            (src_port, dest_port)
         })
         .collect::<Vec<_>>();
-    server::start(ports, bridge, threads).await;
+    let server = Server::new(threads);
+    server.start(ports, bridge).await.unwrap();
 }
 
 async fn start_bridge<'a>(bind: &'a str) {
