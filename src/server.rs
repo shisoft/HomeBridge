@@ -13,6 +13,8 @@ use tokio::{io::AsyncWriteExt, sync::mpsc::Sender};
 use tokio::{net::TcpStream, sync::mpsc::channel};
 use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite};
 
+type ConnMap = Arc<ObjectMap<Arc<Connection>>>;
+
 pub struct Connection {
     id: u64,
     port: u32,
@@ -25,7 +27,7 @@ pub struct Connection {
 
 pub struct Server {
     threads: u32,
-    conns: Arc<ObjectMap<Arc<Connection>>>,
+    conns: ConnMap,
 }
 
 impl Server {
@@ -95,7 +97,7 @@ impl Server {
                             src_port
                         );
                         let connection = conns.get_or_insert(&(conn_id as usize), || {
-                            Arc::new(Connection::new(conn_id, *src_port, out.clone()))
+                            Arc::new(Connection::new(conn_id, *src_port, out.clone(), conns.clone()))
                         });
                         connection.send_to_host(data.freeze()).await;
                     }
@@ -107,7 +109,7 @@ impl Server {
 }
 
 impl Connection {
-    pub fn new(id: u64, port: u32, outgoing_tx: Arc<Sender<(u64, BytesMut)>>) -> Self {
+    pub fn new(id: u64, port: u32, outgoing_tx: Arc<Sender<(u64, BytesMut)>>, conn_map: ConnMap) -> Self {
         let out = outgoing_tx.clone();
         let (host_tx, mut host_rx) = channel::<Bytes>(64);
         tokio::spawn(async move {
@@ -152,6 +154,7 @@ impl Connection {
                         }
                     }
                 }
+                conn_map.remove(&(id as usize));
             }
         });
         Self {
