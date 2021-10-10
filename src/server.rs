@@ -13,14 +13,16 @@ use tokio::{io::AsyncWriteExt, sync::mpsc::Sender};
 use tokio::{net::TcpStream, sync::mpsc::channel};
 use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite};
 
+use crate::utils::unix_timestamp;
+
 type ConnMap = Arc<ObjectMap<Arc<Connection>>>;
 
 pub struct Connection {
     id: u64,
     port: u32,
-    recv_pkt: AtomicUsize,
-    sent_pkt: AtomicUsize,
-    last_act: AtomicU64,
+    recv_pkt: Arc<AtomicUsize>,
+    sent_pkt: Arc<AtomicUsize>,
+    last_act: Arc<AtomicU64>,
     outgoing_tx: Arc<Sender<(u64, BytesMut)>>,
     host_tx: Sender<Bytes>,
 }
@@ -77,7 +79,10 @@ impl Server {
                         }
                     }
                     let _r = writer.close().await;
-                    warn!("Bridge disconnected for thread {} due to channel closed", tid);
+                    warn!(
+                        "Bridge disconnected for thread {} due to channel closed",
+                        tid
+                    );
                 });
                 let rev_port = ports
                     .iter()
@@ -97,7 +102,12 @@ impl Server {
                             src_port
                         );
                         let connection = conns.get_or_insert(&(conn_id as usize), || {
-                            Arc::new(Connection::new(conn_id, *src_port, out.clone(), conns.clone()))
+                            Arc::new(Connection::new(
+                                conn_id,
+                                *src_port,
+                                out.clone(),
+                                conns.clone(),
+                            ))
                         });
                         connection.send_to_host(data.freeze()).await;
                     }
@@ -109,9 +119,22 @@ impl Server {
 }
 
 impl Connection {
-    pub fn new(id: u64, port: u32, outgoing_tx: Arc<Sender<(u64, BytesMut)>>, conn_map: ConnMap) -> Self {
+    pub fn new(
+        id: u64,
+        port: u32,
+        outgoing_tx: Arc<Sender<(u64, BytesMut)>>,
+        conn_map: ConnMap,
+    ) -> Self {
         let out = outgoing_tx.clone();
         let (host_tx, mut host_rx) = channel::<Bytes>(64);
+        let recv_pkt: Arc<AtomicUsize> = Default::default();
+        let sent_pkt: Arc<AtomicUsize> = Default::default();
+        let last_act: Arc<AtomicU64> = Default::default();
+
+        let recv_pkt_c = recv_pkt.clone();
+        let sent_pkt_c = sent_pkt.clone();
+        let last_act_c1 = last_act.clone();
+        let last_act_c2 = last_act.clone();
         tokio::spawn(async move {
             let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
                 .await
@@ -124,15 +147,23 @@ impl Connection {
                     match writer.send(data).await {
                         Ok(_) => {
                             trace!("Sent packet with length of {} to {}", len, port);
-                        },
+                            sent_pkt_c.fetch_add(1, Ordering::Relaxed);
+                            last_act_c1.store(unix_timestamp(), Ordering::Relaxed);
+                        }
                         Err(e) => {
-                            error!("Failing to send packet with length of {} to {}, {:?}", len, port, e)
+                            error!(
+                                "Failing to send packet with length of {} to {}, {:?}",
+                                len, port, e
+                            )
                         }
                     }
                 }
                 info!("Closing connection {}, port {}", id, port);
                 if let Err(e) = writer.close().await {
-                    error!("Failing to close connection to local service {}, {:?}", port, e);
+                    error!(
+                        "Failing to close connection to local service {}, {:?}",
+                        port, e
+                    );
                 };
             });
             loop {
@@ -144,6 +175,8 @@ impl Connection {
                                 id,
                                 port
                             );
+                            recv_pkt_c.fetch_add(1, Ordering::Relaxed);
+                            last_act_c2.store(unix_timestamp(), Ordering::Relaxed);
                             if let Err(e) = out.send((id, bytes)).await {
                                 error!("Error on sending to endpoint channel: {:?}", e);
                             }
@@ -160,9 +193,9 @@ impl Connection {
         Self {
             id,
             port,
-            recv_pkt: Default::default(),
-            sent_pkt: Default::default(),
-            last_act: Default::default(),
+            recv_pkt,
+            sent_pkt,
+            last_act,
             outgoing_tx,
             host_tx,
         }
