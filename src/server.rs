@@ -55,7 +55,7 @@ impl Server {
             let conns = self.conns.clone();
             tokio::spawn(async move {
                 writer
-                    .send(Bytes::copy_from_slice(&ports.len().to_le_bytes()))
+                    .send(Bytes::copy_from_slice(&(ports.len() as u64).to_le_bytes()))
                     .await
                     .unwrap(); // Send length of ports
                 for (_src, dest) in &ports {
@@ -175,11 +175,11 @@ impl Connection {
                                 id,
                                 port
                             );
-                            recv_pkt_c.fetch_add(1, Ordering::Relaxed);
-                            last_act_c2.store(unix_timestamp(), Ordering::Relaxed);
                             if let Err(e) = out.send((id, bytes)).await {
                                 error!("Error on sending to endpoint channel: {:?}", e);
                             }
+                            recv_pkt_c.fetch_add(1, Ordering::Relaxed);
+                            last_act_c2.store(unix_timestamp(), Ordering::Relaxed);
                         }
                         Err(e) => {
                             error!("Cannot read from local service {}, Error {:?}", port, e);
