@@ -13,3 +13,4 @@ futures = {version = "0.3", features = ["executor", "thread-pool"] }
 bytes = "*"
 lightning-containers = "*"
 byteorder = "1"
+parking_lot = "*"
