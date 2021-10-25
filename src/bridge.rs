@@ -50,7 +50,7 @@ struct ClientConnection {
 
 struct ServerConnPool {}
 
-pub async fn new<'a>(addr: &'a str) -> Result<(), Box<dyn Error>> {
+pub async fn start<'a>(addr: &'a str) -> Result<(), Box<dyn Error>> {
     let bridge = Arc::new(Bridge::instance());
     let listener = TcpListener::bind(addr).await?;
     info!("Running bridge service on {}", addr);

@@ -69,5 +69,5 @@ async fn start_server<'a>(ports: &'a str, bridge: &'a str, threads: u32) {
 }
 
 async fn start_bridge<'a>(bind: &'a str) {
-    bridge::start(bind).await;
+    bridge::start(bind).await.unwrap()
 }
