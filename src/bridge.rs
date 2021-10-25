@@ -28,7 +28,7 @@ struct PortServerConnections {
 }
 
 struct BridgePorts {
-    conns: ObjectMap<Arc<ObjectMap<Arc<RwLock<PortServerConnections>>>>>,
+    conns: ObjectMap<Arc<RwLock<PortServerConnections>>>,
 }
 
 struct BridgeServers {
@@ -68,23 +68,6 @@ pub async fn new<'a>(addr: &'a str) -> Result<(), Box<dyn Error>> {
                 .servs
                 .new_server(&bridge, serv_id, stream, addr)
                 .await;
-            // for port in ports {
-            //     let port_key = port as usize;
-            //     loop {
-            //         if let Some(servs) = bridge_ports.get(&port_key) {
-            //             servs.write().add_server_conn(serv_id);
-            //             info!("Added new port {} with serv_id {}", port, serv_id);
-            //             break;
-            //         } else {
-            //             let servs = Arc::new(RwLock::new(Ports::new()));
-            //             if bridge_ports.try_insert(&port_key, servs.clone()).is_none() {
-            //                 servs.write().add_server_conn(serv_id);
-
-            //             }
-            //         }
-            //         warn!("Need to retry adding port {} with {}", port, serv_id);
-            //     }
-            // }
         });
     }
 }
@@ -142,7 +125,7 @@ impl BridgeServers {
         stream: TcpStream,
         addr: SocketAddr,
     ) {
-        let server_conn = ServerConnection::new(bridge, stream, addr).await;
+        let server_conn = ServerConnection::new(serv_id, bridge, stream, addr).await;
         info!("New server connection {:?}, id {}", addr, serv_id);
         self.conns
             .insert(&(serv_id as usize), Arc::new(server_conn));
@@ -150,16 +133,16 @@ impl BridgeServers {
 }
 
 impl ServerConnection {
-    async fn new(bridge: &Arc<Bridge>, stream: TcpStream, addr: SocketAddr) -> Self {
-        let (write, ports) = Self::init_connection(bridge, stream).await;
-        
-        unimplemented!()
+    async fn new(id: u64, bridge: &Arc<Bridge>, stream: TcpStream, addr: SocketAddr) -> Self {
+        let sender = Self::init_connection(id, bridge, stream).await;
+        Self { id, sender }
     }
 
     async fn init_connection(
+        id: u64,
         bridge: &Arc<Bridge>,
         stream: TcpStream,
-    ) -> (Sender<(u32, u64, BytesMut)>, Vec<u32>) {
+    ) -> Sender<(u32, u64, BytesMut)> {
         let bridge = bridge.clone();
         let transport = Framed::new(stream, BytesCodec::new());
         let (mut writer, mut reader) = transport.split();
@@ -174,6 +157,7 @@ impl ServerConnection {
             port_bytes.copy_to_slice(&mut port_data);
             ports.push(u32::from_le_bytes(port_data));
         }
+        init_ports(ports, &bridge, id).await;
         let (write_tx, mut write_rx) = mpsc::channel::<(u32, u64, BytesMut)>(128);
         // Receving packets sending through the connection to the server
         tokio::spawn(async move {
@@ -202,7 +186,38 @@ impl ServerConnection {
                 }
             }
         });
-        return (write_tx, ports);
+        return write_tx;
+    }
+}
+
+async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
+    for port in ports {
+        let port_key = port as usize;
+        loop {
+            if let Some(servs) = bridge.ports.conns.get(&port_key) {
+                servs.write().add_server_conn(serv_id);
+                info!("Added new port {} with serv_id {}", port, serv_id);
+                break;
+            } else {
+                let servs = Arc::new(RwLock::new(PortServerConnections::new()));
+                if bridge
+                    .ports
+                    .conns
+                    .try_insert(&port_key, servs.clone())
+                    .is_none()
+                {
+                    servs.write().add_server_conn(serv_id);
+                    let bridge = bridge.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = init_client_server(port, &bridge, &servs).await {
+                            error!("Client server end with error {:?}", e)
+                        }
+                    });
+                    break;
+                }
+            }
+            warn!("Need to retry adding port {} with {}", port, serv_id);
+        }
     }
 }
 
