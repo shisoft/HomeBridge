@@ -7,7 +7,6 @@ use parking_lot::RwLock;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicBool;
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize},
     Arc,
@@ -16,7 +15,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, channel, Sender};
 use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
 
-use crate::server;
 use crate::utils::FRAME_CAPACITY;
 
 struct ServerConnection {
@@ -349,10 +347,19 @@ async fn init_client_server(
                 }
             });
             while let Some(Ok(res)) = reader.next().await {
-                serv_tx.send(res).await.unwrap();
+                if serv_tx.is_closed() {
+                    warn!("Closing client connection {}", conn_id);
+                    break;
+                } else {
+                    serv_tx.send(res).await.unwrap();
+                }
             }
-            serv_tx.send(BytesMut::new()).await.unwrap();
-            bridge.clients.remove(&(conn_id as usize));
+            // Send empty packet for termination
+            let _ = serv_tx.send(BytesMut::new()).await;
+            let cc = bridge.clients.remove(&(conn_id as usize));
+            if let Some(cc) = cc {
+                let _ = cc.tx.send(BytesMut::new()).await;
+            }
             info!("Connection {} of port {} disconnected", conn_id, port);
         });
     }

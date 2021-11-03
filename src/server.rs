@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    error::Error,
-    sync::{atomic::*, Arc},
-};
+use std::{collections::HashMap, error::Error, sync::{atomic::*, Arc}, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{channel::mpsc::SendError, prelude::*};
@@ -13,7 +9,7 @@ use tokio::{io::AsyncWriteExt, sync::mpsc::Sender};
 use tokio::{net::TcpStream, sync::mpsc::channel};
 use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::utils::{FRAME_CAPACITY, unix_timestamp};
+use crate::utils::{unix_timestamp, FRAME_CAPACITY};
 
 type ConnMap = Arc<ObjectMap<Arc<Connection>>>;
 
@@ -50,103 +46,123 @@ impl Server {
             ports, bridge, self.threads
         );
         for tid in 0..self.threads {
-            let socket = TcpStream::connect(bridge).await?;
-            let transport = Framed::with_capacity(socket, LengthDelimitedCodec::new(), FRAME_CAPACITY);
-            let (mut writer, mut reader) = transport.split();
-            let ports = ports.clone();
             let conns = self.conns.clone();
-            writer
-                .send(Bytes::copy_from_slice(&(ports.len() as u64).to_le_bytes()))
-                .await
-                .unwrap(); // Send length of ports
-            debug!("Reading thread initialization message");
-            let init_res = reader.next().await.unwrap().unwrap();
-            debug!("Thread initialization message received");
-            assert_eq!(init_res.chunk(), &ports.len().to_le_bytes());
-            for (_src, dest) in &ports {
-                match writer
-                    .send(Bytes::copy_from_slice(&dest.to_le_bytes()))
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(e) => {
-                        error!("Cannot send port {} for thread {}, error {}", dest, tid, e);
-                    }
-                }
-                writer.flush().await.unwrap();
-                trace!("Sent port {} for thread {}", dest, tid);
-            }
-            debug!("Reading thread port initialization message");
-            let init_res = reader.next().await.unwrap().unwrap();
-            debug!("Thread port initialization message received");
-            assert_eq!(init_res.chunk(), &1u8.to_le_bytes());
-            let (write_tx, mut write_rx) = channel::<(u64, BytesMut)>(1);
+            let bridge = bridge.to_owned();
+            let ports = ports.clone();
             tokio::spawn(async move {
-                while let Some((conn, data)) = write_rx.recv().await {
-                    let data_len = data.len();
-                    let mut buf = BytesMut::with_capacity(data_len + 8);
-                    buf.put_u64_le(conn);
-                    buf.put(data);
-                    if let Err(e) = writer.send(buf.freeze()).await {
-                        error!(
-                            "Error on sending packet to connection {}, size {}, error {}",
-                            conn, data_len, e
-                        );
-                    }
-                    writer.flush().await.unwrap();
+                loop {
+                    let _ = Self::start_thread(&conns, tid, &ports, &bridge).await;
+                    info!("Disconnected, wait for 5 secs to retry...");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    info!("Reconnecting for thread {}", tid);
                 }
-                let _r = writer.close().await;
-                warn!(
-                    "Bridge disconnected for thread {} due to channel closed",
-                    tid
-                );
-            });
-            let rev_port = ports
-                .iter()
-                .map(|(src, dest)| (*dest, *src))
-                .collect::<HashMap<_, _>>();
-            let out = Arc::new(write_tx);
-            tokio::spawn(async move {
-                while let Some(res) = reader.next().await {
-                    if let Ok(mut data) = res {
-                        let dest_port = data.get_u32_le();
-                        trace!("Received packet for port {}, length {}", dest_port, data.len());
-                        let src_port = match rev_port.get(&dest_port) {
-                            Some(p) => *p,
-                            None => {
-                                error!("Cannot find port {}", dest_port);
-                                continue;
-                            }
-                        };
-                        let conn_id = data.get_u64_le();
-                        trace!(
-                            "Received packet from bridge for {}, conn {}, size {}, sending to {}",
-                            dest_port,
-                            conn_id,
-                            data.len(),
-                            src_port
-                        );
-                        let connection = conns.get_or_insert(&(conn_id as usize), || {
-                            Arc::new(Connection::new(
-                                conn_id,
-                                src_port,
-                                out.clone(),
-                                conns.clone(),
-                            ))
-                        });
-                        if data.remaining() > 0 {
-                            connection.send_to_host(data.freeze()).await;
-                        } else {
-                            debug!("Received close instruction for conn {}, port {}", conn_id, dest_port);
-                            conns.remove(&(conn_id as usize));
-                            connection.send_to_host(data.freeze()).await;
-                            debug!("Closed connection for conn {}, port {}", conn_id, dest_port);
-                        }
-                    }
-                }
-                warn!("Bridge connection closed for thread {}", tid);
             });
         }
+        Ok(())
+    }
+
+    async fn start_thread(conns: &Arc<ObjectMap<Arc<Connection>>>,tid: u32, ports: &Vec<(u32, u32)>, bridge: &String) -> Result<(), Box<dyn Error>> {
+        let socket = TcpStream::connect(bridge).await?;
+        let transport = Framed::with_capacity(socket, LengthDelimitedCodec::new(), FRAME_CAPACITY);
+        let (mut writer, mut reader) = transport.split();
+        let ports = ports.clone();
+        let conns = conns.clone();
+        writer
+            .send(Bytes::copy_from_slice(&(ports.len() as u64).to_le_bytes()))
+            .await
+            .unwrap(); // Send length of ports
+        debug!("Reading thread initialization message");
+        let init_res = reader.next().await.unwrap().unwrap();
+        debug!("Thread initialization message received");
+        assert_eq!(init_res.chunk(), &ports.len().to_le_bytes());
+        for (_src, dest) in &ports {
+            match writer
+                .send(Bytes::copy_from_slice(&dest.to_le_bytes()))
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    error!("Cannot send port {} for thread {}, error {}", dest, tid, e);
+                }
+            }
+            writer.flush().await.unwrap();
+            trace!("Sent port {} for thread {}", dest, tid);
+        }
+        debug!("Reading thread port initialization message");
+        let init_res = reader.next().await.unwrap().unwrap();
+        debug!("Thread port initialization message received");
+        assert_eq!(init_res.chunk(), &1u8.to_le_bytes());
+        let (write_tx, mut write_rx) = channel::<(u64, BytesMut)>(1);
+        tokio::spawn(async move {
+            while let Some((conn, data)) = write_rx.recv().await {
+                let data_len = data.len();
+                let mut buf = BytesMut::with_capacity(data_len + 8);
+                buf.put_u64_le(conn);
+                buf.put(data);
+                if let Err(e) = writer.send(buf.freeze()).await {
+                    error!(
+                        "Error on sending packet to connection {}, size {}, error {}",
+                        conn, data_len, e
+                    );
+                }
+                writer.flush().await.unwrap();
+            }
+            let _r = writer.close().await;
+            warn!(
+                "Bridge disconnected for thread {} due to channel closed",
+                tid
+            );
+        });
+        let rev_port = ports
+            .iter()
+            .map(|(src, dest)| (*dest, *src))
+            .collect::<HashMap<_, _>>();
+        let out = Arc::new(write_tx);
+        while let Some(res) = reader.next().await {
+            if let Ok(mut data) = res {
+                let dest_port = data.get_u32_le();
+                trace!(
+                    "Received packet for port {}, length {}",
+                    dest_port,
+                    data.len()
+                );
+                let src_port = match rev_port.get(&dest_port) {
+                    Some(p) => *p,
+                    None => {
+                        error!("Cannot find port {}", dest_port);
+                        continue;
+                    }
+                };
+                let conn_id = data.get_u64_le();
+                trace!(
+                    "Received packet from bridge for {}, conn {}, size {}, sending to {}",
+                    dest_port,
+                    conn_id,
+                    data.len(),
+                    src_port
+                );
+                let connection = conns.get_or_insert(&(conn_id as usize), || {
+                    Arc::new(Connection::new(
+                        conn_id,
+                        src_port,
+                        out.clone(),
+                        conns.clone(),
+                    ))
+                });
+                if data.remaining() > 0 {
+                    connection.send_to_host(data.freeze()).await;
+                } else {
+                    debug!(
+                        "Received close instruction for conn {}, port {}",
+                        conn_id, dest_port
+                    );
+                    conns.remove(&(conn_id as usize));
+                    connection.send_to_host(data.freeze()).await;
+                    debug!("Closed connection for conn {}, port {}", conn_id, dest_port);
+                }
+            }
+        }
+        warn!("Bridge connection closed for thread {}", tid);
         Ok(())
     }
 }
@@ -227,7 +243,10 @@ impl Connection {
                         }
                     }
                 }
-                info!("Server closed its connection for conn {}, port {}", id, port);
+                info!(
+                    "Server closed its connection for conn {}, port {}",
+                    id, port
+                );
                 let _ = out.send((id, BytesMut::new())).await;
                 conn_map.remove(&(id as usize));
                 break;
