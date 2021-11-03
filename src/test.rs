@@ -4,7 +4,11 @@ use crate::{bridge, server::*, utils::FRAME_CAPACITY};
 use bytes::{Buf, Bytes};
 use futures::{SinkExt, StreamExt};
 use log::*;
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, time::{sleep, Duration}};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    time::{sleep, Duration},
+};
 use tokio_util::codec::{BytesCodec, Framed};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -26,11 +30,21 @@ pub async fn bridge_starts() {
     let transport = Framed::with_capacity(socket, BytesCodec::new(), FRAME_CAPACITY);
     let (mut writer, mut reader) = transport.split();
     for i in 1..1024 {
-      let data = vec![i as u8; i];
-      writer.send(Bytes::copy_from_slice(&data)).await.unwrap();
-      let response = reader.next().await.unwrap().unwrap();
-      assert_eq!(response.chunk(), &data, "Data got len {}, expect {}", response.len(), data.len());
-      info!("Received echo message from bridge with size {}, expecting {}", response.len(), data.len());
+        let data = vec![i as u8; i];
+        writer.send(Bytes::copy_from_slice(&data)).await.unwrap();
+        let response = reader.next().await.unwrap().unwrap();
+        assert_eq!(
+            response.chunk(),
+            &data,
+            "Data got len {}, expect {}",
+            response.len(),
+            data.len()
+        );
+        info!(
+            "Received echo message from bridge with size {}, expecting {}",
+            response.len(),
+            data.len()
+        );
     }
 }
 

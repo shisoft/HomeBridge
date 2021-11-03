@@ -1,4 +1,9 @@
-use std::{collections::HashMap, error::Error, sync::{atomic::*, Arc}, time::Duration};
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::{atomic::*, Arc},
+    time::Duration,
+};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{channel::mpsc::SendError, prelude::*};
@@ -61,7 +66,12 @@ impl Server {
         Ok(())
     }
 
-    async fn start_thread(conns: &Arc<ObjectMap<Arc<Connection>>>,tid: u32, ports: &Vec<(u32, u32)>, bridge: &String) -> Result<(), Box<dyn Error>> {
+    async fn start_thread(
+        conns: &Arc<ObjectMap<Arc<Connection>>>,
+        tid: u32,
+        ports: &Vec<(u32, u32)>,
+        bridge: &String,
+    ) -> Result<(), Box<dyn Error>> {
         let socket = TcpStream::connect(bridge).await?;
         let transport = Framed::with_capacity(socket, LengthDelimitedCodec::new(), FRAME_CAPACITY);
         let (mut writer, mut reader) = transport.split();
