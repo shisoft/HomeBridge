@@ -1,5 +1,6 @@
 use bytes::{Buf, BufMut, BytesMut};
 use core::sync::atomic::Ordering::AcqRel;
+use std::sync::atomic::AtomicBool;
 use futures::{SinkExt, StreamExt};
 use lightning::map::{Map, ObjectMap};
 use log::*;
@@ -48,12 +49,9 @@ struct ClientConnection {
     tx: Sender<BytesMut>,
 }
 
-struct ServerConnPool {}
-
 pub async fn start<'a>(addr: &'a str) -> Result<(), Box<dyn Error>> {
     let bridge = Arc::new(Bridge::instance());
     let listener = TcpListener::bind(addr).await?;
-    info!("Running bridge service on {}", addr);
     loop {
         // Asynchronously wait for an inbound TcpStream.
         let (stream, addr) = listener.accept().await?;
@@ -150,13 +148,31 @@ impl ServerConnection {
         let mut num_ports_data = [0u8; 8];
         num_ports_bytes.copy_to_slice(&mut num_ports_data);
         let num_ports = u64::from_le_bytes(num_ports_data);
+        trace!("Connection {} will have {} ports", id, num_ports);
         let mut ports = Vec::with_capacity(num_ports as usize);
-        for _ in 0..num_ports {
-            let mut port_bytes = reader.next().await.unwrap().unwrap();
+        for i in 0..num_ports {
+            trace!("Reading conn {} port # {}", id, i);
+            let mut port_bytes = match reader.next().await {
+                Some(Ok(b)) => {
+                    trace!("Conn {} port # {} have {} data", id, i, b.len());
+                    b
+                },
+                Some(Err(e)) => {
+                    error!("Error on reading conn {} port # {}, error {:?}", id, i, e);
+                    panic!();
+                }
+                None => {
+                    error!("EOF");
+                    panic!();
+                }
+            };
             let mut port_data = [0u8; 4];
             port_bytes.copy_to_slice(&mut port_data);
-            ports.push(u32::from_le_bytes(port_data));
+            let port = u32::from_le_bytes(port_data);
+            trace!("Conn {} port # {} is {}", id, i, port);
+            ports.push(port);
         }
+        info!("Connection {} accepts ports {:?}", id, ports);
         init_ports(ports, &bridge, id).await;
         let (write_tx, mut write_rx) = mpsc::channel::<(u32, u64, BytesMut)>(128);
         // Receving packets sending through the connection to the server
@@ -169,8 +185,8 @@ impl ServerConnection {
                 out_data.put(data);
                 if let Err(e) = writer.send(out_data.freeze()).await {
                     error!(
-                        "Error on sending packets to server, port {}, conn {}, data size {}",
-                        port, conn, data_size
+                        "Error on sending packets to server, port {}, conn {}, data size {}, error {:?}",
+                        port, conn, data_size, e
                     );
                 }
             }
@@ -180,7 +196,12 @@ impl ServerConnection {
             while let Some(Ok(mut res)) = reader.next().await {
                 let conn_id = res.get_u64_le();
                 if let Some(conn) = bridge.clients.get(&(conn_id as usize)) {
-                    conn.tx.send(res).await;
+                    match conn.tx.send(res).await {
+                        Ok(()) => {},
+                        Err(e) => {
+                            error!("Error on sending data to channel {:?}", e);
+                        }
+                    }
                 } else {
                     error!("Received packet from conn {} but cannot find it", conn_id);
                 }
@@ -199,6 +220,7 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
                 info!("Added new port {} with serv_id {}", port, serv_id);
                 break;
             } else {
+                debug!("Going to start bridge port server for port {}", port);
                 let servs = Arc::new(RwLock::new(PortServerConnections::new()));
                 if bridge
                     .ports
@@ -206,6 +228,7 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
                     .try_insert(&port_key, servs.clone())
                     .is_none()
                 {
+                    debug!("Starting bridge port server for port {}", port);
                     servs.write().add_server_conn(serv_id);
                     let bridge = bridge.clone();
                     tokio::spawn(async move {

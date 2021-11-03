@@ -4,6 +4,8 @@ use server::Server;
 mod bridge;
 mod server;
 mod utils;
+#[cfg(test)]
+mod test;
 
 const PORTS: &'static str = "ports";
 const BRIDGE: &'static str = "bridge";

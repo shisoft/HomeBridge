@@ -34,7 +34,7 @@ pub struct Server {
 
 impl Server {
     pub fn new(threads: u32) -> Self {
-        let conns = Arc::new(ObjectMap::with_capacity(threads as usize));
+        let conns = Arc::new(ObjectMap::with_capacity(threads.next_power_of_two() as usize));
         Self { conns, threads }
     }
 
