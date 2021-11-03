@@ -167,6 +167,7 @@ impl Connection {
         let sent_pkt_c = sent_pkt.clone();
         let last_act_c1 = last_act.clone();
         let last_act_c2 = last_act.clone();
+        let conn_map2 = conn_map.clone();
         tokio::spawn(async move {
             let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
                 .await
@@ -200,6 +201,7 @@ impl Connection {
                         port, e
                     );
                 };
+                conn_map2.remove(&(id as usize));
                 info!("Connection closed for {}, port {}", id, port);
             });
             loop {
@@ -224,6 +226,8 @@ impl Connection {
                         }
                     }
                 }
+                info!("Server closed its connection for conn {}, port {}", id, port);
+                let _ = out.send((id, BytesMut::new())).await;
                 conn_map.remove(&(id as usize));
                 break;
             }

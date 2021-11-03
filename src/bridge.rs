@@ -212,7 +212,7 @@ impl ServerConnection {
                         }
                     }
                 } else {
-                    error!("Received packet from conn {} but cannot find it", conn_id);
+                    warn!("Received packet from conn {} but cannot find it", conn_id);
                 }
             }
         });
@@ -284,8 +284,13 @@ async fn init_client_server(
             let (mut writer, mut reader) = transport.split();
             tokio::spawn(async move {
                 while let Some(data) = client_rx.recv().await {
-                    trace!("Sending to client with data size {}", data.len());
-                    writer.send(data.freeze()).await.unwrap();
+                    if data.remaining() > 0 {
+                        trace!("Sending to client with data size {}", data.len());
+                        writer.send(data.freeze()).await.unwrap();
+                    } else {
+                        info!("Remove server closed its connection for {}", conn_id);
+                        client_rx.close();
+                    }
                 }
                 writer.close().await.unwrap();
             });
