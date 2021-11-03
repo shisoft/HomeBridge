@@ -1,5 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const FRAME_CAPACITY: usize = 4096 * 1024;
+
 pub fn unix_timestamp() -> u64 {
     let start = SystemTime::now();
     let since_the_epoch = start

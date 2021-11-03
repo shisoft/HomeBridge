@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use clap::{App, Arg, SubCommand};
 use server::Server;
 
@@ -14,6 +16,7 @@ const BINDING: &'static str = "binding";
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let matches = App::new("HomeBridge by Shisoft")
         .version("0.1")
         .author("Hao Shi <shisoftgenius@gmail.com>")
@@ -22,18 +25,22 @@ async fn main() {
                 .about("run at server mode at the machine you want to expose")
                 .arg(Arg::with_name(PORTS)
                     .short("p")
+                    .takes_value(true)
                     .help("provide ports mapping to expose, in format like 111:222,333:444, where right hand side is the port on bridge server"))
                 .arg(Arg::with_name(BRIDGE)
                     .short("b")
+                    .takes_value(true)
                     .help("the address to the bridge"))
                 .arg(Arg::with_name("threads")
                     .short("t")
+                    .takes_value(true)
                     .help("number of threads per ports")),
         )
         .subcommand(SubCommand::with_name(BRIDGE)
                 .about("run at bridge mode at the machine have fixed IP address and controllable firewall")
                 .arg(Arg::with_name(BINDING)
                     .short("b")
+                    .takes_value(true)
                     .help("address for server to talk to")))
         .get_matches();
     if let Some(m) = matches.subcommand_matches("server") {
@@ -68,6 +75,9 @@ async fn start_server<'a>(ports: &'a str, bridge: &'a str, threads: u32) {
         .collect::<Vec<_>>();
     let server = Server::new(threads);
     server.start(ports, bridge).await.unwrap();
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 async fn start_bridge<'a>(bind: &'a str) {

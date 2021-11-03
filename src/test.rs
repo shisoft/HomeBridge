@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use crate::{bridge, server::*};
+use crate::{bridge, server::*, utils::FRAME_CAPACITY};
 use bytes::{Buf, Bytes};
 use futures::{SinkExt, StreamExt};
 use log::*;
@@ -13,22 +13,25 @@ pub async fn bridge_starts() {
     tokio::spawn(async { bridge::start("127.0.0.1:3664").await.unwrap() });
     let server = Server::new(1);
     server
-        .start(vec![(3665, 3667), (3668, 3669)], "127.0.0.1:3664")
+        .start(vec![(3665, 3667)], "127.0.0.1:3664")
         .await
         .unwrap();
     tokio::spawn(async {
         echo_server(3665).await.unwrap();
     });
-    let socket = TcpStream::connect("127.0.0.1:3665")
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let socket = TcpStream::connect("127.0.0.1:3667")
         .await
         .expect(&format!("Cannot connect to {}", 3667));
-    let transport = Framed::new(socket, BytesCodec::new());
+    let transport = Framed::with_capacity(socket, BytesCodec::new(), FRAME_CAPACITY);
     let (mut writer, mut reader) = transport.split();
-    let data = (42 as u64).to_le_bytes();
-    writer.send(Bytes::copy_from_slice(&data)).await.unwrap();
-    let response = reader.next().await.unwrap().unwrap();
-    info!("Received echo message from bridge");
-    assert_eq!(response.chunk(), &data);
+    for i in 1..1024 {
+      let data = vec![i as u8; i];
+      writer.send(Bytes::copy_from_slice(&data)).await.unwrap();
+      let response = reader.next().await.unwrap().unwrap();
+      assert_eq!(response.chunk(), &data, "Data got len {}, expect {}", response.len(), data.len());
+      info!("Received echo message from bridge with size {}, expecting {}", response.len(), data.len());
+    }
 }
 
 async fn echo_server(port: u32) -> Result<(), Box<dyn Error>> {
@@ -52,7 +55,7 @@ async fn echo_server(port: u32) -> Result<(), Box<dyn Error>> {
         // which will allow all of our clients to be processed concurrently.
 
         tokio::spawn(async move {
-            let mut buf = vec![0; 1024];
+            let mut buf = vec![0; 4096];
 
             // In a loop, read data from the socket and write the data back.
             loop {

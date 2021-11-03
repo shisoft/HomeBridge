@@ -11,9 +11,9 @@ use log::{debug, error, info, trace, warn};
 use tokio::{io::AsyncReadExt, stream::*};
 use tokio::{io::AsyncWriteExt, sync::mpsc::Sender};
 use tokio::{net::TcpStream, sync::mpsc::channel};
-use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite};
+use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::utils::unix_timestamp;
+use crate::utils::{FRAME_CAPACITY, unix_timestamp};
 
 type ConnMap = Arc<ObjectMap<Arc<Connection>>>;
 
@@ -51,7 +51,7 @@ impl Server {
         );
         for tid in 0..self.threads {
             let socket = TcpStream::connect(bridge).await?;
-            let transport = Framed::new(socket, BytesCodec::new());
+            let transport = Framed::with_capacity(socket, LengthDelimitedCodec::new(), FRAME_CAPACITY);
             let (mut writer, mut reader) = transport.split();
             let ports = ports.clone();
             let conns = self.conns.clone();
@@ -80,7 +80,7 @@ impl Server {
             let init_res = reader.next().await.unwrap().unwrap();
             debug!("Thread port initialization message received");
             assert_eq!(init_res.chunk(), &1u8.to_le_bytes());
-            let (write_tx, mut write_rx) = channel::<(u64, BytesMut)>(128);
+            let (write_tx, mut write_rx) = channel::<(u64, BytesMut)>(1);
             tokio::spawn(async move {
                 while let Some((conn, data)) = write_rx.recv().await {
                     let data_len = data.len();
@@ -93,6 +93,7 @@ impl Server {
                             conn, data_len, e
                         );
                     }
+                    writer.flush().await.unwrap();
                 }
                 let _r = writer.close().await;
                 warn!(
@@ -109,7 +110,14 @@ impl Server {
                 while let Some(res) = reader.next().await {
                     if let Ok(mut data) = res {
                         let dest_port = data.get_u32_le();
-                        let src_port = rev_port.get(&dest_port).unwrap();
+                        trace!("Received packet for port {}, length {}", dest_port, data.len());
+                        let src_port = match rev_port.get(&dest_port) {
+                            Some(p) => *p,
+                            None => {
+                                error!("Cannot find port {}", dest_port);
+                                continue;
+                            }
+                        };
                         let conn_id = data.get_u64_le();
                         trace!(
                             "Received packet from bridge for {}, conn {}, size {}, sending to {}",
@@ -121,7 +129,7 @@ impl Server {
                         let connection = conns.get_or_insert(&(conn_id as usize), || {
                             Arc::new(Connection::new(
                                 conn_id,
-                                *src_port,
+                                src_port,
                                 out.clone(),
                                 conns.clone(),
                             ))
@@ -143,7 +151,7 @@ impl Connection {
         conn_map: ConnMap,
     ) -> Self {
         let out = outgoing_tx.clone();
-        let (host_tx, mut host_rx) = channel::<Bytes>(64);
+        let (host_tx, mut host_rx) = channel::<Bytes>(1);
         let recv_pkt: Arc<AtomicUsize> = Default::default();
         let sent_pkt: Arc<AtomicUsize> = Default::default();
         let last_act: Arc<AtomicU64> = Default::default();
@@ -156,7 +164,7 @@ impl Connection {
             let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
                 .await
                 .expect(&format!("Cannot connect to {}", port));
-            let transport = Framed::new(socket, BytesCodec::new());
+            let transport = Framed::with_capacity(socket, BytesCodec::new(), FRAME_CAPACITY);
             let (mut writer, mut reader) = transport.split();
             tokio::spawn(async move {
                 while let Some(data) = host_rx.recv().await {
@@ -188,9 +196,10 @@ impl Connection {
                     match res {
                         Ok(bytes) => {
                             trace!(
-                                "Received and sending packet to endpoint channel for conn {} port {}",
+                                "Received and sending packet to endpoint channel for conn {} port {}, size {}",
                                 id,
-                                port
+                                port,
+                                bytes.len()
                             );
                             if let Err(e) = out.send((id, bytes)).await {
                                 error!("Error on sending to endpoint channel: {:?}", e);

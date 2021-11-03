@@ -14,9 +14,10 @@ use std::sync::{
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, channel, Sender};
-use tokio_util::codec::{BytesCodec, Framed};
+use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
 
 use crate::server;
+use crate::utils::FRAME_CAPACITY;
 
 struct ServerConnection {
     id: u64,
@@ -142,7 +143,7 @@ impl ServerConnection {
         stream: TcpStream,
     ) -> Sender<(u32, u64, BytesMut)> {
         let bridge = bridge.clone();
-        let transport = Framed::new(stream, BytesCodec::new());
+        let transport = Framed::with_capacity(stream, LengthDelimitedCodec::new(), FRAME_CAPACITY);
         let (mut writer, mut reader) = transport.split();
         let mut num_ports_bytes = reader.next().await.unwrap().unwrap();
         let mut num_ports_data = [0u8; 8];
@@ -177,7 +178,7 @@ impl ServerConnection {
         init_ports(ports, &bridge, id).await;
         writer.send(Bytes::copy_from_slice(&1u8.to_le_bytes())).await.unwrap();
         info!("Ports for {} initialized", id);
-        let (write_tx, mut write_rx) = mpsc::channel::<(u32, u64, BytesMut)>(128);
+        let (write_tx, mut write_rx) = mpsc::channel::<(u32, u64, BytesMut)>(1);
         // Receving packets sending through the connection to the server
         tokio::spawn(async move {
             while let Some((port, conn, data)) = write_rx.recv().await {
@@ -192,6 +193,7 @@ impl ServerConnection {
                         port, conn, data_size, e
                     );
                 }
+                writer.flush().await.unwrap();
             }
         });
         // Receving packets sent from the server to some client
@@ -259,7 +261,7 @@ async fn init_client_server(
         let bridge = bridge.clone();
         let port_conns = port_conns.clone();
         let conn_id = bridge.conn_counter.fetch_add(1, AcqRel);
-        let (client_tx, mut client_rx) = channel::<BytesMut>(128);
+        let (client_tx, mut client_rx) = channel::<BytesMut>(1);
         bridge.clients.insert(
             &(conn_id as usize),
             Arc::new(ClientConnection {
@@ -274,20 +276,21 @@ async fn init_client_server(
                 port,
                 addr
             );
-            let transport = Framed::new(stream, BytesCodec::new());
+            let transport = Framed::with_capacity(stream, BytesCodec::new(), FRAME_CAPACITY);
             let (mut writer, mut reader) = transport.split();
             tokio::spawn(async move {
                 while let Some(data) = client_rx.recv().await {
-                    writer.send(data.freeze()).await;
+                    trace!("Sending to client with data size {}", data.len());
+                    writer.send(data.freeze()).await.unwrap();
                 }
-                writer.close().await;
+                writer.close().await.unwrap();
             });
             while let Some(Ok(res)) = reader.next().await {
                 let serv_id = port_conns.read().next_server_conn();
                 loop {
                     match bridge.servs.conns.get(&(serv_id as usize)) {
                         Some(serv) => {
-                            serv.sender.send((port, conn_id, res)).await;
+                            serv.sender.send((port, conn_id, res)).await.unwrap();
                             break;
                         }
                         None => {
