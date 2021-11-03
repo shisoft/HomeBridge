@@ -27,6 +27,7 @@ pub async fn bridge_starts() {
     let data = (42 as u64).to_le_bytes();
     writer.send(Bytes::copy_from_slice(&data)).await.unwrap();
     let response = reader.next().await.unwrap().unwrap();
+    info!("Received echo message from bridge");
     assert_eq!(response.chunk(), &data);
 }
 

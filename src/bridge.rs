@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::sync::atomic::Ordering::AcqRel;
 use std::sync::atomic::AtomicBool;
 use futures::{SinkExt, StreamExt};
@@ -147,6 +147,7 @@ impl ServerConnection {
         let mut num_ports_bytes = reader.next().await.unwrap().unwrap();
         let mut num_ports_data = [0u8; 8];
         num_ports_bytes.copy_to_slice(&mut num_ports_data);
+        writer.send(Bytes::copy_from_slice(&num_ports_data)).await.unwrap();
         let num_ports = u64::from_le_bytes(num_ports_data);
         trace!("Connection {} will have {} ports", id, num_ports);
         let mut ports = Vec::with_capacity(num_ports as usize);
@@ -174,6 +175,8 @@ impl ServerConnection {
         }
         info!("Connection {} accepts ports {:?}", id, ports);
         init_ports(ports, &bridge, id).await;
+        writer.send(Bytes::copy_from_slice(&1u8.to_le_bytes())).await.unwrap();
+        info!("Ports for {} initialized", id);
         let (write_tx, mut write_rx) = mpsc::channel::<(u32, u64, BytesMut)>(128);
         // Receving packets sending through the connection to the server
         tokio::spawn(async move {
