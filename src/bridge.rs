@@ -1,6 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::sync::atomic::Ordering::AcqRel;
-use std::sync::atomic::AtomicBool;
 use futures::{SinkExt, StreamExt};
 use lightning::map::{Map, ObjectMap};
 use log::*;
@@ -8,6 +7,7 @@ use parking_lot::RwLock;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize},
     Arc,
@@ -22,6 +22,7 @@ use crate::utils::FRAME_CAPACITY;
 struct ServerConnection {
     id: u64,
     sender: Sender<(u32, u64, BytesMut)>,
+    ports: Vec<u32>,
 }
 
 struct PortServerConnections {
@@ -83,10 +84,13 @@ impl PortServerConnections {
         self.list.push(serv_id);
     }
 
-    fn next_server_conn(&self) -> u64 {
+    fn next_server_conn(&self) -> Option<u64> {
         let id = self.balancer.fetch_add(1, AcqRel);
         let len = self.list.len();
-        self.list[id % len]
+        if len == 0 {
+            return None;
+        }
+        Some(self.list[id % len])
     }
 }
 
@@ -129,26 +133,44 @@ impl BridgeServers {
         self.conns
             .insert(&(serv_id as usize), Arc::new(server_conn));
     }
+
+    fn remove(&self, id: u64, bridge: &Arc<Bridge>) {
+        if let Some(svr) = self.conns.remove(&(id as usize)) {
+            for port in &svr.ports {
+                if let Some(ps) = bridge.ports.conns.get(&(*port as usize)) {
+                    let mut ps = ps.write();
+                    let list = &mut ps.list;
+                    if let Ok(i) = list.binary_search(&id) {
+                        assert_eq!(list.remove(i), id);
+                        debug!("Removed server {} from port list {}", id, port);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl ServerConnection {
     async fn new(id: u64, bridge: &Arc<Bridge>, stream: TcpStream, addr: SocketAddr) -> Self {
-        let sender = Self::init_connection(id, bridge, stream).await;
-        Self { id, sender }
+        let (sender, ports) = Self::init_connection(id, bridge, stream).await;
+        Self { id, sender, ports }
     }
 
     async fn init_connection(
         id: u64,
         bridge: &Arc<Bridge>,
         stream: TcpStream,
-    ) -> Sender<(u32, u64, BytesMut)> {
+    ) -> (Sender<(u32, u64, BytesMut)>, Vec<u32>) {
         let bridge = bridge.clone();
         let transport = Framed::with_capacity(stream, LengthDelimitedCodec::new(), FRAME_CAPACITY);
         let (mut writer, mut reader) = transport.split();
         let mut num_ports_bytes = reader.next().await.unwrap().unwrap();
         let mut num_ports_data = [0u8; 8];
         num_ports_bytes.copy_to_slice(&mut num_ports_data);
-        writer.send(Bytes::copy_from_slice(&num_ports_data)).await.unwrap();
+        writer
+            .send(Bytes::copy_from_slice(&num_ports_data))
+            .await
+            .unwrap();
         let num_ports = u64::from_le_bytes(num_ports_data);
         trace!("Connection {} will have {} ports", id, num_ports);
         let mut ports = Vec::with_capacity(num_ports as usize);
@@ -158,7 +180,7 @@ impl ServerConnection {
                 Some(Ok(b)) => {
                     trace!("Conn {} port # {} have {} data", id, i, b.len());
                     b
-                },
+                }
                 Some(Err(e)) => {
                     error!("Error on reading conn {} port # {}, error {:?}", id, i, e);
                     panic!();
@@ -175,8 +197,11 @@ impl ServerConnection {
             ports.push(port);
         }
         info!("Connection {} accepts ports {:?}", id, ports);
-        init_ports(ports, &bridge, id).await;
-        writer.send(Bytes::copy_from_slice(&1u8.to_le_bytes())).await.unwrap();
+        init_ports(ports.clone(), &bridge, id).await;
+        writer
+            .send(Bytes::copy_from_slice(&1u8.to_le_bytes()))
+            .await
+            .unwrap();
         info!("Ports for {} initialized", id);
         let (write_tx, mut write_rx) = mpsc::channel::<(u32, u64, BytesMut)>(1);
         // Receving packets sending through the connection to the server
@@ -189,7 +214,10 @@ impl ServerConnection {
                 if data.len() > 0 {
                     out_data.put(data);
                 } else {
-                    debug!("Sending client close packet for conn {} at port {}", conn, port);
+                    debug!(
+                        "Sending client close packet for conn {} at port {}",
+                        conn, port
+                    );
                 }
                 if let Err(e) = writer.send(out_data.freeze()).await {
                     error!(
@@ -206,7 +234,7 @@ impl ServerConnection {
                 let conn_id = res.get_u64_le();
                 if let Some(conn) = bridge.clients.get(&(conn_id as usize)) {
                     match conn.tx.send(res).await {
-                        Ok(()) => {},
+                        Ok(()) => {}
                         Err(e) => {
                             error!("Error on sending data to channel {:?}", e);
                         }
@@ -215,8 +243,10 @@ impl ServerConnection {
                     warn!("Received packet from conn {} but cannot find it", conn_id);
                 }
             }
+            warn!("Server {} disconnected", id);
+            bridge.servs.remove(id, &bridge);
         });
-        return write_tx;
+        return (write_tx, ports);
     }
 }
 
@@ -298,16 +328,22 @@ async fn init_client_server(
             let (serv_tx, mut serv_rx) = channel::<BytesMut>(1);
             tokio::spawn(async move {
                 while let Some(res) = serv_rx.recv().await {
-                    let serv_id = port_conns.read().next_server_conn();
                     loop {
-                        match bridge_clone.servs.conns.get(&(serv_id as usize)) {
-                            Some(serv) => {
-                                serv.sender.send((port, conn_id, res)).await.unwrap();
-                                break;
+                        let next_conn = port_conns.read().next_server_conn();
+                        if let Some(serv_id) = next_conn {
+                            match bridge_clone.servs.conns.get(&(serv_id as usize)) {
+                                Some(serv) => {
+                                    serv.sender.send((port, conn_id, res)).await.unwrap();
+                                    break;
+                                }
+                                None => {
+                                    warn!("Cannot find service with id {}", serv_id);
+                                }
                             }
-                            None => {
-                                warn!("Cannot find service with id {}", serv_id);
-                            }
+                        } else {
+                            warn!("Cannot find a server to connect to for {}", port);
+                            serv_rx.close();
+                            break;
                         }
                     }
                 }

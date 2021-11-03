@@ -144,6 +144,7 @@ impl Server {
                         }
                     }
                 }
+                warn!("Bridge connection closed for thread {}", tid);
             });
         }
         Ok(())
