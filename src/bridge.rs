@@ -186,7 +186,11 @@ impl ServerConnection {
                 let mut out_data = BytesMut::new();
                 out_data.put_u32_le(port);
                 out_data.put_u64_le(conn);
-                out_data.put(data);
+                if data.len() > 0 {
+                    out_data.put(data);
+                } else {
+                    debug!("Sending client close packet for conn {} at port {}", conn, port);
+                }
                 if let Err(e) = writer.send(out_data.freeze()).await {
                     error!(
                         "Error on sending packets to server, port {}, conn {}, data size {}, error {:?}",
@@ -285,20 +289,28 @@ async fn init_client_server(
                 }
                 writer.close().await.unwrap();
             });
-            while let Some(Ok(res)) = reader.next().await {
-                let serv_id = port_conns.read().next_server_conn();
-                loop {
-                    match bridge.servs.conns.get(&(serv_id as usize)) {
-                        Some(serv) => {
-                            serv.sender.send((port, conn_id, res)).await.unwrap();
-                            break;
-                        }
-                        None => {
-                            error!("Cannot find service with id {}", serv_id);
+            let bridge_clone = bridge.clone();
+            let (serv_tx, mut serv_rx) = channel::<BytesMut>(1);
+            tokio::spawn(async move {
+                while let Some(res) = serv_rx.recv().await {
+                    let serv_id = port_conns.read().next_server_conn();
+                    loop {
+                        match bridge_clone.servs.conns.get(&(serv_id as usize)) {
+                            Some(serv) => {
+                                serv.sender.send((port, conn_id, res)).await.unwrap();
+                                break;
+                            }
+                            None => {
+                                warn!("Cannot find service with id {}", serv_id);
+                            }
                         }
                     }
                 }
+            });
+            while let Some(Ok(res)) = reader.next().await {
+                serv_tx.send(res).await.unwrap();
             }
+            serv_tx.send(BytesMut::new()).await.unwrap();
             bridge.clients.remove(&(conn_id as usize));
             info!("Connection {} of port {} disconnected", conn_id, port);
         });

@@ -134,7 +134,14 @@ impl Server {
                                 conns.clone(),
                             ))
                         });
-                        connection.send_to_host(data.freeze()).await;
+                        if data.remaining() > 0 {
+                            connection.send_to_host(data.freeze()).await;
+                        } else {
+                            debug!("Received close instruction for conn {}, port {}", conn_id, dest_port);
+                            conns.remove(&(conn_id as usize));
+                            connection.send_to_host(data.freeze()).await;
+                            debug!("Closed connection for conn {}, port {}", conn_id, dest_port);
+                        }
                     }
                 }
             });
@@ -169,6 +176,10 @@ impl Connection {
             tokio::spawn(async move {
                 while let Some(data) = host_rx.recv().await {
                     let len = data.len();
+                    if len == 0 {
+                        host_rx.close();
+                        break;
+                    }
                     match writer.send(data).await {
                         Ok(_) => {
                             trace!("Sent packet with length of {} to {}", len, port);
@@ -183,13 +194,13 @@ impl Connection {
                         }
                     }
                 }
-                info!("Closing connection {}, port {}", id, port);
                 if let Err(e) = writer.close().await {
                     error!(
                         "Failing to close connection to local service {}, {:?}",
                         port, e
                     );
                 };
+                info!("Connection closed for {}, port {}", id, port);
             });
             loop {
                 while let Some(res) = reader.next().await {
@@ -214,6 +225,7 @@ impl Connection {
                     }
                 }
                 conn_map.remove(&(id as usize));
+                break;
             }
         });
         Self {
