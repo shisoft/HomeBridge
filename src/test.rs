@@ -1,8 +1,8 @@
-use std::error::Error;
+use std::{error::Error, thread};
 
 use crate::{bridge, server::*, utils::FRAME_CAPACITY};
 use bytes::{Buf, Bytes};
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, stream::FuturesUnordered};
 use log::*;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -15,7 +15,7 @@ use tokio_util::codec::{BytesCodec, Framed};
 pub async fn bridge_starts() {
     let _l = env_logger::try_init();
     tokio::spawn(async { bridge::start("127.0.0.1:3664").await.unwrap() });
-    let server = Server::new(1);
+    let server = Server::new(16);
     server
         .start(vec![(3665, 3667)], "127.0.0.1:3664")
         .await
@@ -24,27 +24,35 @@ pub async fn bridge_starts() {
         echo_server(3665).await.unwrap();
     });
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let socket = TcpStream::connect("127.0.0.1:3667")
-        .await
-        .expect(&format!("Cannot connect to {}", 3667));
-    let transport = Framed::with_capacity(socket, BytesCodec::new(), FRAME_CAPACITY);
-    let (mut writer, mut reader) = transport.split();
-    for i in 1..1024 {
-        let data = vec![i as u8; i];
-        writer.send(Bytes::copy_from_slice(&data)).await.unwrap();
-        let response = reader.next().await.unwrap().unwrap();
-        assert_eq!(
-            response.chunk(),
-            &data,
-            "Data got len {}, expect {}",
-            response.len(),
-            data.len()
-        );
-        info!(
-            "Received echo message from bridge with size {}, expecting {}",
-            response.len(),
-            data.len()
-        );
+    let mut threads = FuturesUnordered::new();
+    for _ in 0..32 {
+        threads.push(tokio::spawn(async {
+            let socket = TcpStream::connect("127.0.0.1:3667")
+                .await
+                .expect(&format!("Cannot connect to {}", 3667));
+            let transport = Framed::with_capacity(socket, BytesCodec::new(), FRAME_CAPACITY);
+            let (mut writer, mut reader) = transport.split();
+            for i in 1..1024 {
+                let data = vec![i as u8; i];
+                writer.send(Bytes::copy_from_slice(&data)).await.unwrap();
+                let response = reader.next().await.unwrap().unwrap();
+                assert_eq!(
+                    response.chunk(),
+                    &data,
+                    "Data got len {}, expect {}",
+                    response.len(),
+                    data.len()
+                );
+                info!(
+                    "Received echo message from bridge with size {}, expecting {}",
+                    response.len(),
+                    data.len()
+                );
+            }
+        }));
+    }
+    while let Some(_) = threads.next().await {
+
     }
 }
 
