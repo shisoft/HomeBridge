@@ -1,15 +1,10 @@
-use std::{
-    collections::HashMap,
-    error::Error,
-    sync::{atomic::*, Arc},
-    time::Duration,
-};
+use std::{cell::RefCell, collections::HashMap, error::Error, mem, sync::{atomic::*, Arc}, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{channel::mpsc::SendError, prelude::*};
 use lightning::map::{Map, ObjectMap};
 use log::{debug, error, info, trace, warn};
-use tokio::{io::AsyncReadExt, stream::*};
+use tokio::{io::AsyncReadExt, stream::*, sync::mpsc::Receiver};
 use tokio::{io::AsyncWriteExt, sync::mpsc::Sender};
 use tokio::{net::TcpStream, sync::mpsc::channel};
 use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -26,7 +21,12 @@ pub struct Connection {
     last_act: Arc<AtomicU64>,
     outgoing_tx: Arc<Sender<(u64, BytesMut)>>,
     host_tx: Sender<Bytes>,
+    host_rx: RefCell<Option<Receiver<Bytes>>>,
+    act: AtomicBool,
+    conn_map: ConnMap,
 }
+
+unsafe impl Sync for Connection {}
 
 pub struct Server {
     threads: u32,
@@ -36,7 +36,7 @@ pub struct Server {
 impl Server {
     pub fn new(threads: u32) -> Self {
         let conns = Arc::new(ObjectMap::with_capacity(
-            (threads.next_power_of_two() * 2) as usize
+            (threads.next_power_of_two() * 2) as usize,
         ));
         Self { conns, threads }
     }
@@ -159,6 +159,7 @@ impl Server {
                         conns.clone(),
                     ))
                 });
+                connection.activate();
                 if data.remaining() > 0 {
                     connection.send_to_host(data.freeze()).await;
                 } else {
@@ -185,16 +186,43 @@ impl Connection {
         conn_map: ConnMap,
     ) -> Self {
         let out = outgoing_tx.clone();
-        let (host_tx, mut host_rx) = channel::<Bytes>(1);
+        let (host_tx, host_rx) = channel::<Bytes>(1);
         let recv_pkt: Arc<AtomicUsize> = Default::default();
         let sent_pkt: Arc<AtomicUsize> = Default::default();
         let last_act: Arc<AtomicU64> = Default::default();
+        Self {
+            id,
+            port,
+            recv_pkt,
+            sent_pkt,
+            last_act,
+            outgoing_tx,
+            host_tx,
+            conn_map,
+            host_rx: RefCell::new(Some(host_rx)),
+            act: AtomicBool::new(false),
+        }
+    }
 
-        let recv_pkt_c = recv_pkt.clone();
-        let sent_pkt_c = sent_pkt.clone();
-        let last_act_c1 = last_act.clone();
-        let last_act_c2 = last_act.clone();
-        let conn_map2 = conn_map.clone();
+    fn activate(&self) {
+        if self
+            .act
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let recv_pkt_c = self.recv_pkt.clone();
+        let sent_pkt_c = self.sent_pkt.clone();
+        let last_act_c1 = self.last_act.clone();
+        let last_act_c2 = self.last_act.clone();
+        let conn_map = self.conn_map.clone();
+        let conn_map2 = self.conn_map.clone();
+        let out = self.outgoing_tx.clone();
+        let port = self.port;
+        let id = self.id;
+        let mut host_rx_holder = self.host_rx.borrow_mut();
+        let mut host_rx = mem::replace(&mut*host_rx_holder, None).unwrap();
         tokio::spawn(async move {
             let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
                 .await
@@ -262,15 +290,6 @@ impl Connection {
                 break;
             }
         });
-        Self {
-            id,
-            port,
-            recv_pkt,
-            sent_pkt,
-            last_act,
-            outgoing_tx,
-            host_tx,
-        }
     }
 
     pub async fn send_to_host(&self, bytes: Bytes) {
