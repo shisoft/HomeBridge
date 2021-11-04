@@ -227,8 +227,7 @@ impl Connection {
         let out = self.outgoing_tx.clone();
         let port = self.port;
         let id = self.id;
-        let mut host_rx_holder = self.host_rx.borrow_mut();
-        let mut host_rx = mem::replace(&mut *host_rx_holder, None).unwrap();
+        let mut host_rx = mem::replace(&mut*self.host_rx.borrow_mut(), None).unwrap();
         debug!("Activating server client {}", self.id);
         let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
