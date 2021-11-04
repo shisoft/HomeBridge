@@ -132,15 +132,15 @@ impl BridgeServers {
             .insert(&(serv_id as usize), Arc::new(server_conn));
     }
 
-    fn remove(&self, id: u64, bridge: &Arc<Bridge>) {
-        if let Some(svr) = self.conns.remove(&(id as usize)) {
+    fn remove(&self, serv_id: u64, bridge: &Arc<Bridge>) {
+        if let Some(svr) = self.conns.remove(&(serv_id as usize)) {
             for port in &svr.ports {
                 if let Some(ps) = bridge.ports.conns.get(&(*port as usize)) {
                     let mut ps = ps.write();
                     let list = &mut ps.list;
-                    if let Ok(i) = list.binary_search(&id) {
-                        assert_eq!(list.remove(i), id);
-                        debug!("Removed server {} from port list {}", id, port);
+                    if let Ok(i) = list.binary_search(&serv_id) {
+                        assert_eq!(list.remove(i), serv_id);
+                        debug!("Removed server {} from port list {}", serv_id, port);
                     }
                 }
             }
@@ -313,10 +313,10 @@ async fn init_client_server(
             tokio::spawn(async move {
                 while let Some(data) = client_rx.recv().await {
                     if data.remaining() > 0 {
-                        trace!("Sending to client with data size {}", data.len());
+                        trace!("Sending to client with data size {}, conn {}", data.len(), conn_id);
                         writer.send(data.freeze()).await.unwrap();
                     } else {
-                        info!("Remove server closed its connection for {}", conn_id);
+                        info!("Remote server closed its connection for {}", conn_id);
                         client_rx.close();
                     }
                 }
