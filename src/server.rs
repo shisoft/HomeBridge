@@ -1,4 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, error::Error, mem, sync::{atomic::*, Arc}, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    error::Error,
+    mem,
+    sync::{atomic::*, Arc},
+    time::Duration,
+};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{channel::mpsc::SendError, prelude::*};
@@ -159,7 +166,7 @@ impl Server {
                         conns.clone(),
                     ))
                 });
-                connection.activate();
+                connection.activate().await;
                 if data.remaining() > 0 {
                     connection.send_to_host(data.freeze()).await;
                 } else {
@@ -185,7 +192,6 @@ impl Connection {
         outgoing_tx: Arc<Sender<(u64, BytesMut)>>,
         conn_map: ConnMap,
     ) -> Self {
-        let out = outgoing_tx.clone();
         let (host_tx, host_rx) = channel::<Bytes>(1);
         let recv_pkt: Arc<AtomicUsize> = Default::default();
         let sent_pkt: Arc<AtomicUsize> = Default::default();
@@ -204,7 +210,7 @@ impl Connection {
         }
     }
 
-    fn activate(&self) {
+    async fn activate(&self) {
         if self
             .act
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -222,74 +228,73 @@ impl Connection {
         let port = self.port;
         let id = self.id;
         let mut host_rx_holder = self.host_rx.borrow_mut();
-        let mut host_rx = mem::replace(&mut*host_rx_holder, None).unwrap();
+        let mut host_rx = mem::replace(&mut *host_rx_holder, None).unwrap();
+        debug!("Activating server client {}", self.id);
+        let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .expect(&format!("Cannot connect to {}", port));
+        let transport = Framed::with_capacity(socket, BytesCodec::new(), FRAME_CAPACITY);
+        let (mut writer, mut reader) = transport.split();
         tokio::spawn(async move {
-            let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .expect(&format!("Cannot connect to {}", port));
-            let transport = Framed::with_capacity(socket, BytesCodec::new(), FRAME_CAPACITY);
-            let (mut writer, mut reader) = transport.split();
-            tokio::spawn(async move {
-                while let Some(data) = host_rx.recv().await {
-                    let len = data.len();
-                    if len == 0 {
-                        host_rx.close();
+            while let Some(data) = host_rx.recv().await {
+                let len = data.len();
+                if len == 0 {
+                    host_rx.close();
+                    break;
+                }
+                match writer.send(data).await {
+                    Ok(_) => {
+                        trace!("Sent packet with length of {} to {}", len, port);
+                        sent_pkt_c.fetch_add(1, Ordering::Relaxed);
+                        last_act_c1.store(unix_timestamp(), Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failing to send packet with length of {} to {}, {:?}",
+                            len, port, e
+                        )
+                    }
+                }
+            }
+            if let Err(e) = writer.close().await {
+                error!(
+                    "Failing to close connection to local service {}, {:?}",
+                    port, e
+                );
+            };
+            conn_map2.remove(&(id as usize));
+            info!("Connection closed for {}, port {}", id, port);
+        });
+        loop {
+            while let Some(res) = reader.next().await {
+                match res {
+                    Ok(bytes) => {
+                        trace!(
+                        "Received and sending packet to endpoint channel for conn {} port {}, size {}",
+                        id,
+                        port,
+                        bytes.len()
+                    );
+                        if let Err(e) = out.send((id, bytes)).await {
+                            error!("Error on sending to endpoint channel: {:?}", e);
+                        }
+                        recv_pkt_c.fetch_add(1, Ordering::Relaxed);
+                        last_act_c2.store(unix_timestamp(), Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        error!("Cannot read from local service {}, Error {:?}", port, e);
                         break;
                     }
-                    match writer.send(data).await {
-                        Ok(_) => {
-                            trace!("Sent packet with length of {} to {}", len, port);
-                            sent_pkt_c.fetch_add(1, Ordering::Relaxed);
-                            last_act_c1.store(unix_timestamp(), Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failing to send packet with length of {} to {}, {:?}",
-                                len, port, e
-                            )
-                        }
-                    }
                 }
-                if let Err(e) = writer.close().await {
-                    error!(
-                        "Failing to close connection to local service {}, {:?}",
-                        port, e
-                    );
-                };
-                conn_map2.remove(&(id as usize));
-                info!("Connection closed for {}, port {}", id, port);
-            });
-            loop {
-                while let Some(res) = reader.next().await {
-                    match res {
-                        Ok(bytes) => {
-                            trace!(
-                                "Received and sending packet to endpoint channel for conn {} port {}, size {}",
-                                id,
-                                port,
-                                bytes.len()
-                            );
-                            if let Err(e) = out.send((id, bytes)).await {
-                                error!("Error on sending to endpoint channel: {:?}", e);
-                            }
-                            recv_pkt_c.fetch_add(1, Ordering::Relaxed);
-                            last_act_c2.store(unix_timestamp(), Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            error!("Cannot read from local service {}, Error {:?}", port, e);
-                            break;
-                        }
-                    }
-                }
-                info!(
-                    "Server closed its connection for conn {}, port {}",
-                    id, port
-                );
-                let _ = out.send((id, BytesMut::new())).await;
-                conn_map.remove(&(id as usize));
-                break;
             }
-        });
+            info!(
+                "Server closed its connection for conn {}, port {}",
+                id, port
+            );
+            let _ = out.send((id, BytesMut::new())).await;
+            conn_map.remove(&(id as usize));
+            break;
+        }
     }
 
     pub async fn send_to_host(&self, bytes: Bytes) {
