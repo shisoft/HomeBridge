@@ -216,6 +216,7 @@ impl Connection {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
+            trace!("Connection {} have already activated", self.id);
             return;
         }
         let recv_pkt_c = self.recv_pkt.clone();
@@ -264,36 +265,38 @@ impl Connection {
             conn_map2.remove(&(id as usize));
             info!("Connection closed for {}, port {}", id, port);
         });
-        loop {
-            while let Some(res) = reader.next().await {
-                match res {
-                    Ok(bytes) => {
-                        trace!(
-                        "Received and sending packet to endpoint channel for conn {} port {}, size {}",
-                        id,
-                        port,
-                        bytes.len()
-                    );
-                        if let Err(e) = out.send((id, bytes)).await {
-                            error!("Error on sending to endpoint channel: {:?}", e);
+        tokio::spawn(async move {
+            loop {
+                while let Some(res) = reader.next().await {
+                    match res {
+                        Ok(bytes) => {
+                            trace!(
+                            "Received and sending packet to endpoint channel for conn {} port {}, size {}",
+                            id,
+                            port,
+                            bytes.len()
+                        );
+                            if let Err(e) = out.send((id, bytes)).await {
+                                error!("Error on sending to endpoint channel: {:?}", e);
+                            }
+                            recv_pkt_c.fetch_add(1, Ordering::Relaxed);
+                            last_act_c2.store(unix_timestamp(), Ordering::Relaxed);
                         }
-                        recv_pkt_c.fetch_add(1, Ordering::Relaxed);
-                        last_act_c2.store(unix_timestamp(), Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        error!("Cannot read from local service {}, Error {:?}", port, e);
-                        break;
+                        Err(e) => {
+                            error!("Cannot read from local service {}, Error {:?}", port, e);
+                            break;
+                        }
                     }
                 }
+                info!(
+                    "Server closed its connection for conn {}, port {}",
+                    id, port
+                );
+                let _ = out.send((id, BytesMut::new())).await;
+                conn_map.remove(&(id as usize));
+                break;
             }
-            info!(
-                "Server closed its connection for conn {}, port {}",
-                id, port
-            );
-            let _ = out.send((id, BytesMut::new())).await;
-            conn_map.remove(&(id as usize));
-            break;
-        }
+        });
     }
 
     pub async fn send_to_host(&self, bytes: Bytes) {
