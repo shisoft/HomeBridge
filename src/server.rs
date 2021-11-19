@@ -110,7 +110,7 @@ impl Server {
         let init_res = reader.next().await.unwrap().unwrap();
         debug!("Thread port initialization message received");
         assert_eq!(init_res.chunk(), &1u8.to_le_bytes());
-        let (write_tx, mut write_rx) = channel::<(u64, BytesMut)>(1);
+        let (write_tx, mut write_rx) = channel::<(u64, BytesMut)>(8);
         tokio::spawn(async move {
             while let Some((conn, data)) = write_rx.recv().await {
                 let data_len = data.len();
@@ -193,7 +193,7 @@ impl Connection {
         outgoing_tx: Arc<Sender<(u64, BytesMut)>>,
         conn_map: ConnMap,
     ) -> Self {
-        let (host_tx, host_rx) = channel::<Bytes>(1);
+        let (host_tx, host_rx) = channel::<Bytes>(8);
         let recv_pkt: Arc<AtomicUsize> = Default::default();
         let sent_pkt: Arc<AtomicUsize> = Default::default();
         let last_act: Arc<AtomicU64> = Default::default();

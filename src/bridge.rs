@@ -206,7 +206,7 @@ impl ServerConnection {
             .await
             .unwrap();
         info!("Ports for {} initialized", id);
-        let (write_tx, mut write_rx) = mpsc::channel::<(u32, u64, BytesMut)>(1);
+        let (write_tx, mut write_rx) = mpsc::channel::<(u32, u64, BytesMut)>(8);
         // Receving packets sending through the connection to the server
         tokio::spawn(async move {
             while let Some((port, conn, data)) = write_rx.recv().await {
@@ -320,7 +320,7 @@ async fn init_client_server(
         let bridge = bridge.clone();
         let port_conns = port_conns.clone();
         let conn_id = bridge.conn_counter.fetch_add(1, AcqRel);
-        let (client_tx, mut client_rx) = channel::<BytesMut>(1);
+        let (client_tx, mut client_rx) = channel::<BytesMut>(8);
         bridge.clients.insert(
             &(conn_id as usize),
             Arc::new(ClientConnection {
@@ -350,7 +350,7 @@ async fn init_client_server(
                 writer.close().await.unwrap();
             });
             let bridge_clone = bridge.clone();
-            let (serv_tx, mut serv_rx) = channel::<BytesMut>(1);
+            let (serv_tx, mut serv_rx) = channel::<BytesMut>(8);
             tokio::spawn(async move {
                 while let Some(res) = serv_rx.recv().await {
                     loop {
