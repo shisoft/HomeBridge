@@ -251,7 +251,6 @@ impl ServerConnection {
                 thread::sleep(Duration::from_secs(5));
                 let close_tx = close_tx.clone();
                 if close_tx.is_closed() {
-                    debug!("Heartbeat checker thread closed for {}", id);
                     return;
                 }
                 if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
@@ -378,11 +377,7 @@ async fn init_client_server(
                         if let Some(serv_id) = next_conn {
                             match bridge_clone.servs.conns.get(&(serv_id as usize)) {
                                 Some(serv) => {
-                                    if serv.sender.send((port, conn_id, res)).await.is_err() {
-                                        warn!("Cannot send to server for port {}, conn {}, it was closed", port, conn_id);
-                                        serv_rx.close();
-                                        return;
-                                    }
+                                    serv.sender.send((port, conn_id, res)).await.unwrap();
                                     break;
                                 }
                                 None => {
