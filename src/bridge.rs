@@ -240,13 +240,13 @@ impl ServerConnection {
         let timer_last = last.clone();
         let close_tx = write_tx.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
             if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
                 info!("Server {} has timeout, closing channel", id);
                 if let Err(e) = close_tx.send((0, 0, BytesMut::new())).await {
                     error!("Error on closing time out server channel {:?}", e);
                 }
             }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         });
         // Receving packets sent from the server to some client
         tokio::spawn(async move {
