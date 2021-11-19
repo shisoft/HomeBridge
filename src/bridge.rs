@@ -1,4 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tokio::runtime::Runtime;
 use core::sync::atomic::Ordering::AcqRel;
 use futures::{SinkExt, StreamExt};
 use lightning::map::{Map, ObjectMap};
@@ -244,19 +245,22 @@ impl ServerConnection {
         let last_timeout = 30 * 1000;
         let timer_last = last.clone();
         let close_tx = write_tx.clone();
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(5));
-            let close_tx = close_tx.clone();
-            if close_tx.is_closed() {
-                return;
-            }
-            if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
-                info!("Server {} has timeout, closing channel", id);
-                tokio::spawn(async move {
-                    if let Err(e) = close_tx.send((0, 0, BytesMut::new())).await {
-                        error!("Error on closing time out server channel {:?}", e);
-                    }
-                });
+        thread::spawn(move || {
+            let rt = Runtime::new().unwrap();
+            loop {
+                thread::sleep(Duration::from_secs(5));
+                let close_tx = close_tx.clone();
+                if close_tx.is_closed() {
+                    return;
+                }
+                if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
+                    info!("Server {} has timeout, closing channel", id);
+                    rt.block_on(async move {
+                        if let Err(e) = close_tx.send((0, 0, BytesMut::new())).await {
+                            error!("Error on closing time out server channel {:?}", e);
+                        }
+                    });
+                }
             }
         });
         // Receving packets sent from the server to some client

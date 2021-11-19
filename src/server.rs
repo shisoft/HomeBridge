@@ -12,7 +12,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{channel::mpsc::SendError, prelude::*};
 use lightning::map::{Map, ObjectMap};
 use log::{debug, error, info, trace, warn};
-use tokio::{io::AsyncReadExt, stream::*, sync::mpsc::Receiver};
+use tokio::{io::AsyncReadExt, runtime::Runtime, stream::*, sync::mpsc::Receiver};
 use tokio::{io::AsyncWriteExt, sync::mpsc::Sender};
 use tokio::{net::TcpStream, sync::mpsc::channel};
 use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -243,19 +243,22 @@ impl Connection {
         let (mut writer, mut reader) = transport.split();
         let last_timeout = 5 * 1000;
         let close_tx = self.host_tx.clone();
-        thread::spawn(move || loop {
-            let close_tx = close_tx.clone();
-            thread::sleep(Duration::from_secs(5));
-            if close_tx.is_closed() {
-                return;
-            }
-            if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
-                tokio::spawn(async move {
-                    let mut buf = BytesMut::new();
-                    buf.put_u64_le(0);
+        thread::spawn(move || {
+            let rt = Runtime::new().unwrap();
+            loop {
+                let close_tx = close_tx.clone();
+                thread::sleep(Duration::from_secs(5));
+                if close_tx.is_closed() {
+                    return;
+                }
+                if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
                     trace!("Sending heartbeat packet as {}", id);
-                    close_tx.send(buf.freeze()).await.unwrap();
-                });
+                    rt.block_on(async move {
+                        let mut buf = BytesMut::new();
+                        buf.put_u64_le(0);
+                        close_tx.send(buf.freeze()).await.unwrap();
+                    });
+                }
             }
         });
         tokio::spawn(async move {
