@@ -246,7 +246,7 @@ impl Connection {
             if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
                 let mut buf = BytesMut::new();
                 buf.put_u64_le(0);
-                trace!("Sending heartbeat packet as {}", self.id);
+                trace!("Sending heartbeat packet as {}", id);
                 close_tx.send(buf.freeze()).await.unwrap();
             }
         });
