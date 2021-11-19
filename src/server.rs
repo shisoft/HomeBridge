@@ -249,6 +249,7 @@ impl Connection {
                 trace!("Sending heartbeat packet as {}", id);
                 close_tx.send(buf.freeze()).await.unwrap();
             }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         });
         tokio::spawn(async move {
             while let Some(data) = host_rx.recv().await {
