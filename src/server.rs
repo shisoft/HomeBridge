@@ -1,4 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, error::Error, mem, sync::{atomic::*, Arc}, thread, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    error::Error,
+    mem,
+    sync::{atomic::*, Arc},
+    time::Duration,
+};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{channel::mpsc::SendError, prelude::*};
@@ -235,16 +242,14 @@ impl Connection {
         let (mut writer, mut reader) = transport.split();
         let last_timeout = 5 * 1000;
         let close_tx = self.host_tx.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(5));
-            tokio::spawn(async move {
-                if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
-                    let mut buf = BytesMut::new();
-                    buf.put_u64_le(0);
-                    trace!("Sending heartbeat packet as {}", id);
-                    close_tx.send(buf.freeze()).await.unwrap();
-                }
-            })
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
+                let mut buf = BytesMut::new();
+                buf.put_u64_le(0);
+                trace!("Sending heartbeat packet as {}", id);
+                close_tx.send(buf.freeze()).await.unwrap();
+            }
         });
         tokio::spawn(async move {
             while let Some(data) = host_rx.recv().await {

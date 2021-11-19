@@ -7,7 +7,7 @@ use lightning::map::{Map, ObjectMap};
 use log::*;
 use parking_lot::RwLock;
 use std::error::Error;
-use std::{io, thread};
+use std::io;
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize},
@@ -239,17 +239,15 @@ impl ServerConnection {
         let last_timeout = 30 * 1000;
         let timer_last = last.clone();
         let close_tx = write_tx.clone();
-        // thread::spawn(move || {
-        //     thread::sleep(Duration::from_secs(5));
-        //     if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
-        //         info!("Server {} has timeout, closing channel", id);
-        //         tokio::spawn(async move {
-        //             if let Err(e) = close_tx.send((0, 0, BytesMut::new())).await {
-        //                 error!("Error on closing time out server channel {:?}", e);
-        //             }
-        //         });
-        //     }
-        // });
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
+                info!("Server {} has timeout, closing channel", id);
+                if let Err(e) = close_tx.send((0, 0, BytesMut::new())).await {
+                    error!("Error on closing time out server channel {:?}", e);
+                }
+            }
+        });
         // Receving packets sent from the server to some client
         tokio::spawn(async move {
             while let Some(Ok(mut res)) = reader.next().await {
