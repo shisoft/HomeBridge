@@ -1,12 +1,4 @@
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    error::Error,
-    mem,
-    sync::{atomic::*, Arc},
-    thread,
-    time::Duration,
-};
+use std::{cell::RefCell, collections::HashMap, error::Error, mem, sync::{atomic::*, Arc}, thread, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{channel::mpsc::SendError, prelude::*};
@@ -234,7 +226,7 @@ impl Connection {
         let out = self.outgoing_tx.clone();
         let port = self.port;
         let id = self.id;
-        let mut host_rx = mem::replace(&mut *self.host_rx.borrow_mut(), None).unwrap();
+        let mut host_rx = mem::replace(&mut*self.host_rx.borrow_mut(), None).unwrap();
         debug!("Activating server client {}", self.id);
         let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
@@ -243,20 +235,16 @@ impl Connection {
         let (mut writer, mut reader) = transport.split();
         let last_timeout = 5 * 1000;
         let close_tx = self.host_tx.clone();
-        thread::spawn(move || loop {
-            let close_tx = close_tx.clone();
+        thread::spawn(move || {
             thread::sleep(Duration::from_secs(5));
-            if close_tx.is_closed() {
-                return;
-            }
-            if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
-                tokio::spawn(async move {
+            tokio::spawn(async move {
+                if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
                     let mut buf = BytesMut::new();
                     buf.put_u64_le(0);
                     trace!("Sending heartbeat packet as {}", id);
                     close_tx.send(buf.freeze()).await.unwrap();
-                });
-            }
+                }
+            })
         });
         tokio::spawn(async move {
             while let Some(data) = host_rx.recv().await {

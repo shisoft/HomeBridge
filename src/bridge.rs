@@ -1,29 +1,29 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::sync::atomic::Ordering::AcqRel;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use lightning::map::{Map, ObjectMap};
 use log::*;
 use parking_lot::RwLock;
 use std::error::Error;
+use std::{io, thread};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize},
     Arc,
 };
-use std::time::Duration;
-use std::{io, thread};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, channel, Sender};
 use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
 
-use crate::utils::{unix_timestamp, FRAME_CAPACITY};
+use crate::utils::{FRAME_CAPACITY, unix_timestamp};
 
 struct ServerConnection {
     id: u64,
     sender: Sender<(u32, u64, BytesMut)>,
     ports: Vec<u32>,
-    last: Arc<AtomicU64>,
+    last: Arc<AtomicU64>
 }
 
 struct PortServerConnections {
@@ -155,19 +155,14 @@ impl ServerConnection {
     async fn new(id: u64, bridge: &Arc<Bridge>, stream: TcpStream, addr: SocketAddr) -> Self {
         let last = Arc::new(AtomicU64::new(unix_timestamp()));
         let (sender, ports) = Self::init_connection(id, bridge, stream, last.clone()).await;
-        Self {
-            id,
-            sender,
-            ports,
-            last,
-        }
+        Self { id, sender, ports, last }
     }
 
     async fn init_connection(
         id: u64,
         bridge: &Arc<Bridge>,
         stream: TcpStream,
-        last: Arc<AtomicU64>,
+        last: Arc<AtomicU64>
     ) -> (Sender<(u32, u64, BytesMut)>, Vec<u32>) {
         let bridge = bridge.clone();
         let transport = Framed::with_capacity(stream, LengthDelimitedCodec::new(), FRAME_CAPACITY);
@@ -244,21 +239,17 @@ impl ServerConnection {
         let last_timeout = 30 * 1000;
         let timer_last = last.clone();
         let close_tx = write_tx.clone();
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(5));
-            let close_tx = close_tx.clone();
-            if close_tx.is_closed() {
-                return;
-            }
-            if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
-                info!("Server {} has timeout, closing channel", id);
-                tokio::spawn(async move {
-                    if let Err(e) = close_tx.send((0, 0, BytesMut::new())).await {
-                        error!("Error on closing time out server channel {:?}", e);
-                    }
-                });
-            }
-        });
+        // thread::spawn(move || {
+        //     thread::sleep(Duration::from_secs(5));
+        //     if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
+        //         info!("Server {} has timeout, closing channel", id);
+        //         tokio::spawn(async move {
+        //             if let Err(e) = close_tx.send((0, 0, BytesMut::new())).await {
+        //                 error!("Error on closing time out server channel {:?}", e);
+        //             }
+        //         });
+        //     }
+        // });
         // Receving packets sent from the server to some client
         tokio::spawn(async move {
             while let Some(Ok(mut res)) = reader.next().await {
@@ -351,11 +342,7 @@ async fn init_client_server(
             tokio::spawn(async move {
                 while let Some(data) = client_rx.recv().await {
                     if data.remaining() > 0 {
-                        trace!(
-                            "Sending to client with data size {}, conn {}",
-                            data.len(),
-                            conn_id
-                        );
+                        trace!("Sending to client with data size {}, conn {}", data.len(), conn_id);
                         writer.send(data.freeze()).await.unwrap();
                     } else {
                         info!("Remote server closed its connection for {}", conn_id);
