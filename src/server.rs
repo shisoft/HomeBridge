@@ -26,6 +26,7 @@ pub struct Connection {
     recv_pkt: Arc<AtomicUsize>,
     sent_pkt: Arc<AtomicUsize>,
     last_act: Arc<AtomicU64>,
+    last_sent: Arc<AtomicU64>,
     outgoing_tx: Arc<Sender<(u64, BytesMut)>>,
     host_tx: Sender<Bytes>,
     host_rx: RefCell<Option<Receiver<Bytes>>>,
@@ -196,12 +197,14 @@ impl Connection {
         let recv_pkt: Arc<AtomicUsize> = Default::default();
         let sent_pkt: Arc<AtomicUsize> = Default::default();
         let last_act: Arc<AtomicU64> = Default::default();
+        let last_sent: Arc<AtomicU64> = Default::default();
         Self {
             id,
             port,
             recv_pkt,
             sent_pkt,
             last_act,
+            last_sent,
             outgoing_tx,
             host_tx,
             conn_map,
@@ -223,6 +226,8 @@ impl Connection {
         let sent_pkt_c = self.sent_pkt.clone();
         let last_act_c1 = self.last_act.clone();
         let last_act_c2 = self.last_act.clone();
+        let last_sent_c1 = self.last_sent.clone();
+        let last_sent_c2 = self.last_sent.clone();
         let conn_map = self.conn_map.clone();
         let conn_map2 = self.conn_map.clone();
         let out = self.outgoing_tx.clone();
@@ -235,6 +240,16 @@ impl Connection {
             .expect(&format!("Cannot connect to {}", port));
         let transport = Framed::with_capacity(socket, BytesCodec::new(), FRAME_CAPACITY);
         let (mut writer, mut reader) = transport.split();
+        let last_timeout = 5 * 1000;
+        let close_tx = self.host_tx.clone();
+        tokio::spawn(async move {
+            if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
+                let mut buf = BytesMut::new();
+                buf.put_u64_le(0);
+                trace!("Sending heartbeat packet as {}", self.id);
+                close_tx.send(buf.freeze()).await.unwrap();
+            }
+        });
         tokio::spawn(async move {
             while let Some(data) = host_rx.recv().await {
                 let len = data.len();
@@ -245,8 +260,10 @@ impl Connection {
                 match writer.send(data).await {
                     Ok(_) => {
                         trace!("Sent packet with length of {} to {}", len, port);
+                        let timestamp = unix_timestamp();
                         sent_pkt_c.fetch_add(1, Ordering::Relaxed);
-                        last_act_c1.store(unix_timestamp(), Ordering::Relaxed);
+                        last_sent_c1.store(timestamp, Ordering::Relaxed);
+                        last_act_c1.store(timestamp, Ordering::Relaxed);
                     }
                     Err(e) => {
                         error!(

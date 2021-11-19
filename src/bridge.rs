@@ -1,5 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::sync::atomic::Ordering::AcqRel;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use lightning::map::{Map, ObjectMap};
 use log::*;
@@ -15,12 +17,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, channel, Sender};
 use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
 
-use crate::utils::FRAME_CAPACITY;
+use crate::utils::{FRAME_CAPACITY, unix_timestamp};
 
 struct ServerConnection {
     id: u64,
     sender: Sender<(u32, u64, BytesMut)>,
     ports: Vec<u32>,
+    last: Arc<AtomicU64>
 }
 
 struct PortServerConnections {
@@ -95,7 +98,7 @@ impl PortServerConnections {
 impl Bridge {
     pub fn instance() -> Self {
         Self {
-            conn_counter: AtomicU64::new(0),
+            conn_counter: AtomicU64::new(1), // 0 for heartbeat
             serv_counter: AtomicU64::new(0),
             ports: BridgePorts::new(),
             servs: BridgeServers::new(),
@@ -150,14 +153,16 @@ impl BridgeServers {
 
 impl ServerConnection {
     async fn new(id: u64, bridge: &Arc<Bridge>, stream: TcpStream, addr: SocketAddr) -> Self {
-        let (sender, ports) = Self::init_connection(id, bridge, stream).await;
-        Self { id, sender, ports }
+        let last = Arc::new(AtomicU64::new(unix_timestamp()));
+        let (sender, ports) = Self::init_connection(id, bridge, stream, last.clone()).await;
+        Self { id, sender, ports, last }
     }
 
     async fn init_connection(
         id: u64,
         bridge: &Arc<Bridge>,
         stream: TcpStream,
+        last: Arc<AtomicU64>
     ) -> (Sender<(u32, u64, BytesMut)>, Vec<u32>) {
         let bridge = bridge.clone();
         let transport = Framed::with_capacity(stream, LengthDelimitedCodec::new(), FRAME_CAPACITY);
@@ -205,6 +210,11 @@ impl ServerConnection {
         // Receving packets sending through the connection to the server
         tokio::spawn(async move {
             while let Some((port, conn, data)) = write_rx.recv().await {
+                if port == 0 && conn == 0 {
+                    info!("Closed channel for service {} port {}", id, port);
+                    write_rx.close();
+                    continue;
+                }
                 let data_size = data.len();
                 let mut out_data = BytesMut::new();
                 out_data.put_u32_le(port);
@@ -226,10 +236,27 @@ impl ServerConnection {
                 writer.flush().await.unwrap();
             }
         });
+        let last_timeout = 30 * 1000;
+        let timer_last = last.clone();
+        let close_tx = write_tx.clone();
+        tokio::spawn(async move {
+            if unix_timestamp() - timer_last.load(Ordering::SeqCst) > last_timeout {
+                info!("Server {} has timeout, closing channel", id);
+                if let Err(e) = close_tx.send((0, 0, BytesMut::new())).await {
+                    error!("Error on closing time out server channel {:?}", e);
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
         // Receving packets sent from the server to some client
         tokio::spawn(async move {
             while let Some(Ok(mut res)) = reader.next().await {
+                last.store(unix_timestamp(), Ordering::SeqCst);
                 let conn_id = res.get_u64_le();
+                if conn_id == 0 {
+                    trace!("Received heartbeat packet from server {}", id);
+                    continue;
+                }
                 if let Some(conn) = bridge.clients.get(&(conn_id as usize)) {
                     match conn.tx.send(res).await {
                         Ok(()) => {}
