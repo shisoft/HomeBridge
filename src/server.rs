@@ -243,13 +243,13 @@ impl Connection {
         let last_timeout = 5 * 1000;
         let close_tx = self.host_tx.clone();
         tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
             if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
                 let mut buf = BytesMut::new();
                 buf.put_u64_le(0);
                 trace!("Sending heartbeat packet as {}", id);
                 close_tx.send(buf.freeze()).await.unwrap();
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
         });
         tokio::spawn(async move {
             while let Some(data) = host_rx.recv().await {
