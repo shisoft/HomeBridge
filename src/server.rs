@@ -249,6 +249,7 @@ impl Connection {
                 let close_tx = close_tx.clone();
                 thread::sleep(Duration::from_secs(5));
                 if close_tx.is_closed() {
+                    debug!("Heartbeat thread closed for {}", id);
                     return;
                 }
                 if unix_timestamp() - last_sent_c2.load(Ordering::SeqCst) > last_timeout {
