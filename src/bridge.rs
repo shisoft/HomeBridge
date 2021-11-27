@@ -1,14 +1,13 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::sync::atomic::Ordering::AcqRel;
 use futures::{SinkExt, StreamExt};
-use lightning::map::{Map, ObjectMap};
+use lightning::map::{Map, ObjectMap, WordMap};
 use log::*;
-use parking_lot::RwLock;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{
-    atomic::{AtomicU64, AtomicUsize},
+    atomic::{AtomicU64},
     Arc,
 };
 use tokio::net::{TcpListener, TcpStream};
@@ -23,13 +22,8 @@ struct ServerConnection {
     ports: Vec<u32>,
 }
 
-struct PortServerConnections {
-    list: Vec<u64>,
-    balancer: AtomicUsize,
-}
-
 struct BridgePorts {
-    conns: ObjectMap<Arc<RwLock<PortServerConnections>>>,
+    conns: WordMap,
 }
 
 struct BridgeServers {
@@ -70,28 +64,6 @@ pub async fn start<'a>(addr: &'a str) -> Result<(), Box<dyn Error>> {
     }
 }
 
-impl PortServerConnections {
-    fn new() -> Self {
-        Self {
-            list: Default::default(),
-            balancer: Default::default(),
-        }
-    }
-
-    fn add_server_conn(&mut self, serv_id: u64) {
-        self.list.push(serv_id);
-    }
-
-    fn next_server_conn(&self) -> Option<u64> {
-        let id = self.balancer.fetch_add(1, AcqRel);
-        let len = self.list.len();
-        if len == 0 {
-            return None;
-        }
-        Some(self.list[id % len])
-    }
-}
-
 impl Bridge {
     pub fn instance() -> Self {
         Self {
@@ -107,7 +79,7 @@ impl Bridge {
 impl BridgePorts {
     fn new() -> Self {
         Self {
-            conns: ObjectMap::with_capacity(64),
+            conns: WordMap::with_capacity(64),
         }
     }
 }
@@ -135,13 +107,10 @@ impl BridgeServers {
     fn remove(&self, serv_id: u64, bridge: &Arc<Bridge>) {
         if let Some(svr) = self.conns.remove(&(serv_id as usize)) {
             for port in &svr.ports {
-                if let Some(ps) = bridge.ports.conns.get(&(*port as usize)) {
-                    let mut ps = ps.write();
-                    let list = &mut ps.list;
-                    if let Ok(i) = list.binary_search(&serv_id) {
-                        assert_eq!(list.remove(i), serv_id);
-                        debug!("Removed server {} from port list {}", serv_id, port);
-                    }
+                if let Some(ps) = bridge.ports.conns.remove(&(*port as usize)) {
+                    debug!("Removed server {} from port list {}", serv_id, port);
+                } else {
+                    warn!("Cannot remove server {} from port list {}", serv_id, port);
                 }
             }
         }
@@ -205,6 +174,11 @@ impl ServerConnection {
         // Receving packets sending through the connection to the server
         tokio::spawn(async move {
             while let Some((port, conn, data)) = write_rx.recv().await {
+                if port == 0 && conn == 0 {
+                    info!("Closing port server {} connection", id);
+                    writer.close();
+                    break;
+                }
                 let data_size = data.len();
                 let mut out_data = BytesMut::new();
                 out_data.put_u32_le(port);
@@ -246,52 +220,46 @@ impl ServerConnection {
         });
         return (write_tx, ports);
     }
+
+    async fn close(&self) {
+        self.sender.send((0, 0, BytesMut::new())).await;
+    }
 }
 
 async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
     for port in ports {
         let port_key = port as usize;
-        loop {
-            if let Some(servs) = bridge.ports.conns.get(&port_key) {
-                servs.write().add_server_conn(serv_id);
-                info!("Added new port {} with serv_id {}", port, serv_id);
-                break;
-            } else {
-                debug!("Going to start bridge port server for port {}", port);
-                let servs = Arc::new(RwLock::new(PortServerConnections::new()));
-                if bridge
-                    .ports
-                    .conns
-                    .try_insert(&port_key, servs.clone())
-                    .is_none()
-                {
-                    debug!("Starting bridge port server for port {}", port);
-                    servs.write().add_server_conn(serv_id);
-                    let bridge = bridge.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = init_client_server(port, &bridge, &servs).await {
-                            error!("Client server end with error {:?}", e)
-                        }
-                    });
-                    break;
-                }
+        debug!("Going to start bridge port server for port {}", port);
+        if let Some(old_serv_id) = bridge
+            .ports
+            .conns
+            .insert(&port_key, serv_id as usize)
+        {
+            warn!("Register replaced service id from {} to {} for port {}", old_serv_id, serv_id, port);
+            if let Some(serv) = bridge.servs.conns.get(&old_serv_id) {
+                serv.close().await;
             }
-            warn!("Need to retry adding port {} with {}", port, serv_id);
         }
+        debug!("Starting bridge port server for port {}", port);
+        let bridge = bridge.clone();
+        tokio::spawn(async move {
+            if let Err(e) = init_client_server(port, &bridge, serv_id).await {
+                error!("Client server end with error {:?}", e)
+            }
+        });
     }
 }
 
 async fn init_client_server(
     port: u32,
     bridge: &Arc<Bridge>,
-    port_conns: &Arc<RwLock<PortServerConnections>>,
+    serv_id: u64,
 ) -> io::Result<()> {
     info!("Starting to listen at port {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     loop {
         let (stream, addr) = listener.accept().await?;
         let bridge = bridge.clone();
-        let port_conns = port_conns.clone();
         let conn_id = bridge.conn_counter.fetch_add(1, AcqRel);
         let (client_tx, mut client_rx) = channel::<BytesMut>(1);
         bridge.clients.insert(
@@ -313,7 +281,11 @@ async fn init_client_server(
             tokio::spawn(async move {
                 while let Some(data) = client_rx.recv().await {
                     if data.remaining() > 0 {
-                        trace!("Sending to client with data size {}, conn {}", data.len(), conn_id);
+                        trace!(
+                            "Sending to client with data size {}, conn {}",
+                            data.len(),
+                            conn_id
+                        );
                         writer.send(data.freeze()).await.unwrap();
                     } else {
                         info!("Remote server closed its connection for {}", conn_id);
@@ -326,23 +298,13 @@ async fn init_client_server(
             let (serv_tx, mut serv_rx) = channel::<BytesMut>(1);
             tokio::spawn(async move {
                 while let Some(res) = serv_rx.recv().await {
-                    loop {
-                        let next_conn = port_conns.read().next_server_conn();
-                        if let Some(serv_id) = next_conn {
-                            match bridge_clone.servs.conns.get(&(serv_id as usize)) {
-                                Some(serv) => {
-                                    serv.sender.send((port, conn_id, res)).await.unwrap();
-                                    break;
-                                }
-                                None => {
-                                    warn!("Cannot find service with id {}", serv_id);
-                                }
-                            }
-                        } else {
-                            warn!("Cannot find a server to connect to for {}", port);
-                            serv_rx.close();
-                            break;
-                        }
+                    let conn = bridge_clone.servs.conns.get(&(serv_id as usize));
+                    if let Some(serv) = conn {
+                        serv.sender.send((port, conn_id, res)).await.unwrap();
+                    } else {
+                        warn!("Cannot find a server to connect to for {}", port);
+                        serv_rx.close();
+                        break;
                     }
                 }
             });
