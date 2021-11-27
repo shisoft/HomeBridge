@@ -36,16 +36,13 @@ pub struct Connection {
 unsafe impl Sync for Connection {}
 
 pub struct Server {
-    threads: u32,
     conns: ConnMap,
 }
 
 impl Server {
-    pub fn new(threads: u32) -> Self {
-        let conns = Arc::new(ObjectMap::with_capacity(
-            (threads.next_power_of_two() * 2) as usize,
-        ));
-        Self { conns, threads }
+    pub fn new() -> Self {
+        let conns = Arc::new(ObjectMap::with_capacity(128));
+        Self { conns }
     }
 
     pub async fn start<'a>(
@@ -54,28 +51,25 @@ impl Server {
         bridge: &'a str,
     ) -> Result<(), Box<dyn Error + '_>> {
         info!(
-            "Running as server with ports {:?}, bridge {} and {} threads for each port",
-            ports, bridge, self.threads
+            "Running as server with ports {:?}, bridge {} for each port",
+            ports, bridge
         );
-        for tid in 0..self.threads {
-            let conns = self.conns.clone();
-            let bridge = bridge.to_owned();
-            let ports = ports.clone();
-            tokio::spawn(async move {
-                loop {
-                    let _ = Self::start_thread(&conns, tid, &ports, &bridge).await;
-                    info!("Disconnected, wait for 5 secs to retry...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    info!("Reconnecting for thread {}", tid);
-                }
-            });
-        }
+        let conns = self.conns.clone();
+        let bridge = bridge.to_owned();
+        let ports = ports.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = Self::start_thread(&conns, &ports, &bridge).await;
+                info!("Disconnected, wait for 5 secs to retry...");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                info!("Reconnecting...");
+            }
+        });
         Ok(())
     }
 
     async fn start_thread(
         conns: &Arc<ObjectMap<Arc<Connection>>>,
-        tid: u32,
         ports: &Vec<(u32, u32)>,
         bridge: &String,
     ) -> Result<(), Box<dyn Error>> {
@@ -99,11 +93,11 @@ impl Server {
             {
                 Ok(()) => {}
                 Err(e) => {
-                    error!("Cannot send port {} for thread {}, error {}", dest, tid, e);
+                    error!("Cannot send port {}, error {}", dest, e);
                 }
             }
             writer.flush().await.unwrap();
-            trace!("Sent port {} for thread {}", dest, tid);
+            trace!("Sent port {}", dest);
         }
         debug!("Reading thread port initialization message");
         let init_res = reader.next().await.unwrap().unwrap();
@@ -126,8 +120,7 @@ impl Server {
             }
             let _r = writer.close().await;
             warn!(
-                "Bridge disconnected for thread {} due to channel closed",
-                tid
+                "Bridge disconnected due to channel closed"
             );
         });
         let rev_port = ports
@@ -180,7 +173,7 @@ impl Server {
                 }
             }
         }
-        warn!("Bridge connection closed for thread {}", tid);
+        warn!("Bridge connection closed for");
         Ok(())
     }
 }

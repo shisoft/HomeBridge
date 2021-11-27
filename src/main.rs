@@ -30,11 +30,7 @@ async fn main() {
                 .arg(Arg::with_name(BRIDGE)
                     .short("b")
                     .takes_value(true)
-                    .help("the address to the bridge"))
-                .arg(Arg::with_name("threads")
-                    .short("t")
-                    .takes_value(true)
-                    .help("number of threads per ports")),
+                    .help("the address to the bridge")),
         )
         .subcommand(SubCommand::with_name(BRIDGE)
                 .about("run at bridge mode at the machine have fixed IP address and controllable firewall")
@@ -73,7 +69,7 @@ async fn start_server<'a>(ports: &'a str, bridge: &'a str, threads: u32) {
             (src_port, dest_port)
         })
         .collect::<Vec<_>>();
-    let server = Server::new(threads);
+    let server = Server::new();
     server.start(ports, bridge).await.unwrap();
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;

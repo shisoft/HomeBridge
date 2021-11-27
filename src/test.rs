@@ -15,7 +15,7 @@ use tokio_util::codec::{BytesCodec, Framed};
 pub async fn bridge_starts() {
     let _l = env_logger::try_init();
     tokio::spawn(async { bridge::start("127.0.0.1:3664").await.unwrap() });
-    let server = Server::new(16);
+    let server = Server::new();
     server
         .start(vec![(3665, 3667)], "127.0.0.1:3664")
         .await
