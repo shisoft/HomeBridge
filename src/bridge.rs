@@ -281,6 +281,8 @@ async fn init_client_server(
                 tx: client_tx,
             }),
         );
+        let closing = closing.clone();
+        let bridge_clone = bridge.clone();
         tokio::spawn(async move {
             trace!(
                 "Accepting connection {} at port {} from {:?}",
@@ -304,7 +306,11 @@ async fn init_client_server(
                         client_rx.close();
                     }
                 }
-                writer.close().await.unwrap();
+                warn!("Server {} channel have been closed, shutting down connections", serv_id);
+                bridge_clone.servs.remove(serv_id, &bridge_clone);
+                let _ = writer.close().await;
+                let _ = client_rx.close();
+                return;
             });
             let bridge_clone = bridge.clone();
             let (serv_tx, mut serv_rx) = channel::<BytesMut>(1);
