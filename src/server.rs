@@ -181,7 +181,7 @@ impl Server {
                 }
             }
         }
-        warn!("Bridge connection closed for");
+        warn!("Bridge connection closed");
         Ok(())
     }
 }
