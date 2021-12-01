@@ -60,6 +60,14 @@ impl Server {
         tokio::spawn(async move {
             loop {
                 let _ = Self::start_thread(&conns, &ports, &bridge).await;
+                conns.entries().into_iter().for_each(|(id, conn)| {
+                    tokio::spawn(async move {
+                        // Send empty to close the connection
+                        warn!("Closing connection {} due to bridge offline", id);
+                        conn.host_tx.send(Bytes::new()).await
+                    });
+                    conns.remove(&id);
+                });
                 info!("Disconnected, wait for 5 secs to retry...");
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 info!("Reconnecting...");
@@ -232,6 +240,7 @@ impl Connection {
             while let Some(data) = host_rx.recv().await {
                 let len = data.len();
                 if len == 0 {
+                    trace!("Received host connection close packet for {}", id);
                     host_rx.close();
                     break;
                 }

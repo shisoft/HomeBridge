@@ -107,7 +107,7 @@ impl BridgeServers {
     fn remove(&self, serv_id: u64, bridge: &Arc<Bridge>) {
         if let Some(svr) = self.conns.remove(&(serv_id as usize)) {
             for port in &svr.ports {
-                if let Some(ps) = bridge.ports.conns.remove(&(*port as usize)) {
+                if let Some(_ps) = bridge.ports.conns.remove(&(*port as usize)) {
                     debug!("Removed server {} from port list {}", serv_id, port);
                 } else {
                     warn!("Cannot remove server {} from port list {}", serv_id, port);
@@ -176,7 +176,7 @@ impl ServerConnection {
             while let Some((port, conn, data)) = write_rx.recv().await {
                 if port == 0 && conn == 0 {
                     info!("Closing port server {} connection", id);
-                    writer.close();
+                    let _ = writer.close();
                     break;
                 }
                 let data_size = data.len();
@@ -215,14 +215,14 @@ impl ServerConnection {
                     warn!("Received packet from conn {} but cannot find it", conn_id);
                 }
             }
-            warn!("Server {} disconnected", id);
+            error!("Server {} disconnected", id);
             bridge.servs.remove(id, &bridge);
         });
         return (write_tx, ports);
     }
 
     async fn close(&self) {
-        self.sender.send((0, 0, BytesMut::new())).await;
+        let _ = self.sender.send((0, 0, BytesMut::new())).await;
     }
 }
 
