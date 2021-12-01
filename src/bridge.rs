@@ -6,10 +6,8 @@ use log::*;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{
-    atomic::{AtomicU64},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{atomic::AtomicU64, Arc};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, channel, Sender};
 use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
@@ -24,6 +22,7 @@ struct ServerConnection {
 
 struct BridgePorts {
     conns: WordMap,
+    close: ObjectMap<Arc<AtomicBool>>,
 }
 
 struct BridgeServers {
@@ -80,6 +79,7 @@ impl BridgePorts {
     fn new() -> Self {
         Self {
             conns: WordMap::with_capacity(64),
+            close: ObjectMap::with_capacity(64),
         }
     }
 }
@@ -107,6 +107,10 @@ impl BridgeServers {
     fn remove(&self, serv_id: u64, bridge: &Arc<Bridge>) {
         if let Some(svr) = self.conns.remove(&(serv_id as usize)) {
             for port in &svr.ports {
+                if let Some(closed) = bridge.ports.close.remove(&(*port as usize)) {
+                    debug!("Closing client server for port {}", port);
+                    closed.store(true, Ordering::SeqCst);
+                }
                 if let Some(_ps) = bridge.ports.conns.remove(&(*port as usize)) {
                     debug!("Removed server {} from port list {}", serv_id, port);
                 } else {
@@ -229,13 +233,20 @@ impl ServerConnection {
 async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
     for port in ports {
         let port_key = port as usize;
+        let new_closed = Arc::new(AtomicBool::new(false));
         debug!("Going to start bridge port server for port {}", port);
-        if let Some(old_serv_id) = bridge
+        if let Some(old_server_closed) = bridge
             .ports
-            .conns
-            .insert(&port_key, serv_id as usize)
+            .close
+            .insert(&port_key, new_closed.clone())
         {
-            warn!("Register replaced service id from {} to {} for port {}", old_serv_id, serv_id, port);
+            old_server_closed.store(true, Ordering::SeqCst);
+        }
+        if let Some(old_serv_id) = bridge.ports.conns.insert(&port_key, serv_id as usize) {
+            warn!(
+                "Register replaced service id from {} to {} for port {}",
+                old_serv_id, serv_id, port
+            );
             if let Some(serv) = bridge.servs.conns.get(&old_serv_id) {
                 serv.close().await;
             }
@@ -243,7 +254,7 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
         debug!("Starting bridge port server for port {}", port);
         let bridge = bridge.clone();
         tokio::spawn(async move {
-            if let Err(e) = init_client_server(port, &bridge, serv_id).await {
+            if let Err(e) = init_client_server(port, &bridge, serv_id, new_closed).await {
                 error!("Client server end with error {:?}", e)
             }
         });
@@ -254,10 +265,11 @@ async fn init_client_server(
     port: u32,
     bridge: &Arc<Bridge>,
     serv_id: u64,
+    closing: Arc<AtomicBool>,
 ) -> io::Result<()> {
     info!("Starting to listen at port {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    loop {
+    while !closing.load(Ordering::SeqCst) {
         let (stream, addr) = listener.accept().await?;
         let bridge = bridge.clone();
         let conn_id = bridge.conn_counter.fetch_add(1, AcqRel);
@@ -325,4 +337,5 @@ async fn init_client_server(
             info!("Connection {} of port {} disconnected", conn_id, port);
         });
     }
+    return Ok(())
 }
