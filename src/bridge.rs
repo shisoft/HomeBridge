@@ -337,5 +337,6 @@ async fn init_client_server(
             info!("Connection {} of port {} disconnected", conn_id, port);
         });
     }
+    warn!("Stopped listening to port {}", port);
     return Ok(())
 }
