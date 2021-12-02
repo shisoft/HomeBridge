@@ -169,14 +169,18 @@ impl Server {
                 });
                 connection.activate().await;
                 if data.remaining() > 0 {
-                    connection.send_to_host(data.freeze()).await;
+                    if let Err(e) = connection.host_tx.send(data.freeze()).await {
+                        error!("Cannot send data to channel for conn {}, port {}, error: {:?}", conn_id, dest_port, e);
+                    }
                 } else {
                     debug!(
                         "Received close instruction for conn {}, port {}",
                         conn_id, dest_port
                     );
+                    if let Err(e) = connection.host_tx.send(data.freeze()).await {
+                        error!("Cannot send close instruction to channel for conn {}, port {}, error: {:?}", conn_id, dest_port, e)
+                    }
                     conns.remove(&(conn_id as usize));
-                    connection.send_to_host(data.freeze()).await;
                     debug!("Closed connection for conn {}, port {}", conn_id, dest_port);
                 }
             }
@@ -299,11 +303,5 @@ impl Connection {
                 break;
             }
         });
-    }
-
-    pub async fn send_to_host(&self, bytes: Bytes) {
-        if let Err(e) = self.host_tx.send(bytes).await {
-            error!("Error to send to host channel {}, {:?}", self.id, e)
-        }
     }
 }

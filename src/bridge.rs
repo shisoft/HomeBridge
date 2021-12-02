@@ -281,7 +281,6 @@ async fn init_client_server(
                 tx: client_tx,
             }),
         );
-        let closing = closing.clone();
         let bridge_clone = bridge.clone();
         tokio::spawn(async move {
             trace!(
