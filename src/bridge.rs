@@ -306,7 +306,6 @@ async fn init_client_server(
                     }
                 }
                 warn!("Server {} channel have been closed, shutting down connections", serv_id);
-                bridge_clone.servs.remove(serv_id, &bridge_clone);
                 let _ = writer.close().await;
                 let _ = client_rx.close();
                 return;
