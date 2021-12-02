@@ -305,7 +305,7 @@ async fn init_client_server(
                         client_rx.close();
                     }
                 }
-                warn!("Server {} channel have been closed, shutting down connections", serv_id);
+                warn!("Server {}, conn {} channel have been closed", serv_id, conn_id);
                 let _ = writer.close().await;
                 let _ = client_rx.close();
                 return;
