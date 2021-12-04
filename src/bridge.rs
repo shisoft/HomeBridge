@@ -22,7 +22,7 @@ struct ServerConnection {
 }
 
 struct BridgePorts {
-    conns: WordMap,
+    servs: WordMap,
 }
 
 struct BridgeServers {
@@ -78,7 +78,7 @@ impl Bridge {
 impl BridgePorts {
     fn new() -> Self {
         Self {
-            conns: WordMap::with_capacity(64),
+            servs: WordMap::with_capacity(64),
         }
     }
 }
@@ -106,7 +106,7 @@ impl BridgeServers {
     fn remove(&self, serv_id: u64, bridge: &Arc<Bridge>) {
         if let Some(svr) = self.conns.remove(&(serv_id as usize)) {
             for port in &svr.ports {
-                if let Some(_ps) = bridge.ports.conns.remove(&(*port as usize)) {
+                if let Some(_ps) = bridge.ports.servs.remove(&(*port as usize)) {
                     debug!("Removed server {} from port list {}", serv_id, port);
                 } else {
                     warn!("Cannot remove server {} from port list {}", serv_id, port);
@@ -231,7 +231,7 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
         let new_closed = Arc::new(AtomicBool::new(false));
         let (closed_tx, closed_rx) = oneshot::channel::<()>();
         debug!("Going to start bridge port server for port {}", port);
-        if let Some(old_serv_id) = bridge.ports.conns.insert(&port_key, serv_id as usize) {
+        if let Some(old_serv_id) = bridge.ports.servs.insert(&port_key, serv_id as usize) {
             warn!(
                 "Register replaced service id from {} to {} for port {}",
                 old_serv_id, serv_id, port
@@ -256,7 +256,7 @@ async fn init_client_server(
 ) -> io::Result<()> {
     info!("Starting to listen at port {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    loop {
+    while let Some(serv_id) = bridge.ports.servs.get(&(port as usize)) {
         let (stream, addr) = listener.accept().await?;
         let bridge = bridge.clone();
         let conn_id = bridge.conn_counter.fetch_add(1, AcqRel);
@@ -292,7 +292,8 @@ async fn init_client_server(
                     }
                 }
                 warn!(
-                    "Server conn {} channel have been closed",
+                    "Server {} conn {} channel have been closed",
+                    serv_id,
                     conn_id
                 );
                 let _ = writer.close().await;
@@ -330,4 +331,6 @@ async fn init_client_server(
             info!("Connection {} of port {} disconnected", conn_id, port);
         });
     }
+    warn!("Client server ended for port {}", port);
+    return Ok(());
 }
