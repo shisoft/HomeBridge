@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{atomic::AtomicU64, Arc};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, channel, Sender};
+use tokio::sync::oneshot::{self, Receiver};
 use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
 
 use crate::utils::FRAME_CAPACITY;
@@ -234,13 +235,18 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
     for port in ports {
         let port_key = port as usize;
         let new_closed = Arc::new(AtomicBool::new(false));
+        let (closed_tx, closed_rx) = oneshot::channel::<()>();
         debug!("Going to start bridge port server for port {}", port);
-        if let Some(old_server_closed) = bridge
-            .ports
-            .close
-            .insert(&port_key, new_closed.clone())
-        {
+        if let Some(old_server_closed) = bridge.ports.close.insert(&port_key, new_closed.clone()) {
+            warn!("Discovered old server for port {}, closing...", port);
             old_server_closed.store(true, Ordering::SeqCst);
+            match closed_rx.await {
+                Ok(_) => debug!("Old server disconnected by new server for port {}", port),
+                Err(e) => error!(
+                    "Cannot disconnect old server for port {}, error {:?}",
+                    port, e
+                ),
+            }
         }
         if let Some(old_serv_id) = bridge.ports.conns.insert(&port_key, serv_id as usize) {
             warn!(
@@ -254,7 +260,7 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
         debug!("Starting bridge port server for port {}", port);
         let bridge = bridge.clone();
         tokio::spawn(async move {
-            if let Err(e) = init_client_server(port, &bridge, serv_id, new_closed).await {
+            if let Err(e) = init_client_server(port, &bridge, serv_id, new_closed, closed_tx).await {
                 error!("Client server end with error {:?}", e)
             }
         });
@@ -266,6 +272,7 @@ async fn init_client_server(
     bridge: &Arc<Bridge>,
     serv_id: u64,
     closing: Arc<AtomicBool>,
+    closed: oneshot::Sender<()>,
 ) -> io::Result<()> {
     info!("Starting to listen at port {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
@@ -281,7 +288,6 @@ async fn init_client_server(
                 tx: client_tx,
             }),
         );
-        let bridge_clone = bridge.clone();
         tokio::spawn(async move {
             trace!(
                 "Accepting connection {} at port {} from {:?}",
@@ -305,7 +311,10 @@ async fn init_client_server(
                         client_rx.close();
                     }
                 }
-                warn!("Server {}, conn {} channel have been closed", serv_id, conn_id);
+                warn!(
+                    "Server {}, conn {} channel have been closed",
+                    serv_id, conn_id
+                );
                 let _ = writer.close().await;
                 let _ = client_rx.close();
                 return;
@@ -342,5 +351,6 @@ async fn init_client_server(
         });
     }
     warn!("Stopped listening to port {}", port);
-    return Ok(())
+    let _ = closed.send(());
+    return Ok(());
 }
