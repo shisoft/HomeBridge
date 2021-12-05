@@ -228,32 +228,28 @@ impl ServerConnection {
 async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
     for port in ports {
         let port_key = port as usize;
-        let new_closed = Arc::new(AtomicBool::new(false));
-        let (closed_tx, closed_rx) = oneshot::channel::<()>();
         debug!("Going to start bridge port server for port {}", port);
         if let Some(old_serv_id) = bridge.ports.servs.insert(&port_key, serv_id as usize) {
-            warn!(
+            info!(
                 "Register replaced service id from {} to {} for port {}",
                 old_serv_id, serv_id, port
             );
             if let Some(serv) = bridge.servs.conns.get(&old_serv_id) {
                 serv.close().await;
             }
+        } else {
+            debug!("Starting bridge port server for port {}", port);
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                if let Err(e) = init_client_server(port, &bridge).await {
+                    error!("Client server end with error {:?}", e)
+                }
+            });
         }
-        debug!("Starting bridge port server for port {}", port);
-        let bridge = bridge.clone();
-        tokio::spawn(async move {
-            if let Err(e) = init_client_server(port, &bridge).await {
-                error!("Client server end with error {:?}", e)
-            }
-        });
     }
 }
 
-async fn init_client_server(
-    port: u32,
-    bridge: &Arc<Bridge>
-) -> io::Result<()> {
+async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
     info!("Starting to listen at port {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     while let Some(serv_id) = bridge.ports.servs.get(&(port as usize)) {
@@ -293,8 +289,7 @@ async fn init_client_server(
                 }
                 warn!(
                     "Server {} conn {} channel have been closed",
-                    serv_id,
-                    conn_id
+                    serv_id, conn_id
                 );
                 let _ = writer.close().await;
                 let _ = client_rx.close();
