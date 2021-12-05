@@ -103,15 +103,9 @@ impl BridgeServers {
             .insert(&(serv_id as usize), Arc::new(server_conn));
     }
 
-    fn remove(&self, serv_id: u64, bridge: &Arc<Bridge>) {
-        if let Some(svr) = self.conns.remove(&(serv_id as usize)) {
-            for port in &svr.ports {
-                if let Some(_ps) = bridge.ports.servs.remove(&(*port as usize)) {
-                    debug!("Removed server {} from port list {}", serv_id, port);
-                } else {
-                    warn!("Cannot remove server {} from port list {}", serv_id, port);
-                }
-            }
+    fn remove(&self, serv_id: u64) {
+        if let Some(_) = self.conns.remove(&(serv_id as usize)) {
+            debug!("Removed server with id {}", serv_id)
         }
     }
 }
@@ -215,7 +209,7 @@ impl ServerConnection {
                 }
             }
             error!("Server {} disconnected", id);
-            bridge.servs.remove(id, &bridge);
+            bridge.servs.remove(id);
         });
         return (write_tx, ports);
     }
