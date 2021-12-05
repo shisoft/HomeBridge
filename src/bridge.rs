@@ -297,7 +297,7 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
                     if let Some(serv) = conn {
                         serv.sender.send((port, conn_id, res)).await.unwrap();
                     } else {
-                        warn!("Cannot find a server to connect to for {}", port);
+                        warn!("Cannot find server {} to connect to for {}", serv_id, port);
                         serv_rx.close();
                         break;
                     }
