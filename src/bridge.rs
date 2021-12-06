@@ -228,6 +228,7 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
                 "Register replaced service id from {} to {} for port {}",
                 old_serv_id, serv_id, port
             );
+            debug_assert_eq!(bridge.ports.servs.get(&port_key), Some(serv_id as usize));
             if let Some(serv) = bridge.servs.conns.get(&old_serv_id) {
                 serv.close().await;
             }
@@ -297,7 +298,7 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
                     if let Some(serv) = conn {
                         serv.sender.send((port, conn_id, res)).await.unwrap();
                     } else {
-                        warn!("Cannot find server {} to connect to for {}", serv_id, port);
+                        warn!("Cannot find server {} to connect to for port {}", serv_id, port);
                         serv_rx.close();
                         break;
                     }

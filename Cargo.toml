@@ -11,7 +11,7 @@ tokio-util  = { version = "0.6", features = ["full"] }
 log = "0.4"
 futures = {version = "0.3", features = ["executor", "thread-pool"] }
 bytes = "*"
-lightning-containers = "*"
+lightning-containers ={ path = "../Lightning" }
 byteorder = "1"
 parking_lot = "*"
 env_logger = "*"
