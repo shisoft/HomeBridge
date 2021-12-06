@@ -231,6 +231,11 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
             debug_assert_eq!(bridge.ports.servs.get(&port_key), Some(serv_id as usize));
             if let Some(serv) = bridge.servs.conns.get(&old_serv_id) {
                 serv.close().await;
+            } else {
+                warn!(
+                    "Cannot find server {} to shutdown. Maybe already did that.",
+                    old_serv_id
+                );
             }
         } else {
             debug!("Starting bridge port server for port {}", port);
@@ -247,7 +252,7 @@ async fn init_ports(ports: Vec<u32>, bridge: &Arc<Bridge>, serv_id: u64) {
 async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
     info!("Starting to listen at port {}", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    while let Some(serv_id) = bridge.ports.servs.get(&(port as usize)) {
+    loop {
         let (stream, addr) = listener.accept().await?;
         let bridge = bridge.clone();
         let conn_id = bridge.conn_counter.fetch_add(1, AcqRel);
@@ -282,10 +287,7 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
                         client_rx.close();
                     }
                 }
-                warn!(
-                    "Server {} conn {} channel have been closed",
-                    serv_id, conn_id
-                );
+                warn!("Conn {} channel have been closed", conn_id);
                 let _ = writer.close().await;
                 let _ = client_rx.close();
                 return;
@@ -293,12 +295,18 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
             let bridge_clone = bridge.clone();
             let (serv_tx, mut serv_rx) = channel::<BytesMut>(1);
             tokio::spawn(async move {
-                while let Some(res) = serv_rx.recv().await {
+                while let (Some(res), Some(serv_id)) = (
+                    serv_rx.recv().await,
+                    bridge_clone.ports.servs.get(&(port as usize)),
+                ) {
                     let conn = bridge_clone.servs.conns.get(&(serv_id as usize));
                     if let Some(serv) = conn {
                         serv.sender.send((port, conn_id, res)).await.unwrap();
                     } else {
-                        warn!("Cannot find server {} to connect to for port {}", serv_id, port);
+                        warn!(
+                            "Cannot find server {} to connect to for port {}",
+                            serv_id, port
+                        );
                         serv_rx.close();
                         break;
                     }
