@@ -274,6 +274,7 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
             let transport = Framed::with_capacity(stream, BytesCodec::new(), FRAME_CAPACITY);
             let (mut writer, mut reader) = transport.split();
             tokio::spawn(async move {
+                debug!("Receving client packets from channel for conn {}, port {}", conn_id, port);
                 while let Some(data) = client_rx.recv().await {
                     if data.remaining() > 0 {
                         trace!(
@@ -295,6 +296,7 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
             let bridge_clone = bridge.clone();
             let (serv_tx, mut serv_rx) = channel::<BytesMut>(1);
             tokio::spawn(async move {
+                debug!("Receving server packets from channel for conn {}, port {}", conn_id, port);
                 while let (Some(res), Some(serv_id)) = (
                     serv_rx.recv().await,
                     bridge_clone.ports.servs.get(&(port as usize)),
@@ -312,6 +314,10 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
                     }
                 }
             });
+            debug!(
+                "Reading incomming packets, conn {} at port {} from {:?}",
+                conn_id, port, addr
+            );
             while let Some(Ok(res)) = reader.next().await {
                 if serv_tx.is_closed() {
                     warn!("Closing client connection {}", conn_id);
@@ -320,13 +326,13 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
                     serv_tx.send(res).await.unwrap();
                 }
             }
-            // Send empty packet for termination
+            debug!("Send empty packet for termination, conn {} at port {} from {:?}", conn_id, port, addr);
             let _ = serv_tx.send(BytesMut::new()).await;
             let cc = bridge.clients.remove(&(conn_id as usize));
             if let Some(cc) = cc {
                 let _ = cc.tx.send(BytesMut::new()).await;
             }
-            info!("Connection {} of port {} disconnected", conn_id, port);
+            info!("Connection {} of port {} from {:?} disconnected", conn_id, port, addr);
         });
     }
     warn!("Client server ended for port {}", port);
