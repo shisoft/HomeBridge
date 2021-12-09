@@ -88,10 +88,9 @@ impl Server {
         let conns = conns.clone();
         writer
             .send(Bytes::copy_from_slice(&(ports.len() as u64).to_le_bytes()))
-            .await
-            .unwrap(); // Send length of ports
+            .await?; // Send length of ports
         debug!("Reading thread initialization message");
-        let init_res = reader.next().await.unwrap().unwrap();
+        let init_res = reader.next().await.unwrap()?;
         debug!("Thread initialization message received");
         assert_eq!(init_res.chunk(), &ports.len().to_le_bytes());
         for (_src, dest) in &ports {
@@ -108,7 +107,7 @@ impl Server {
             trace!("Sent port {}", dest);
         }
         debug!("Reading thread port initialization message");
-        let init_res = reader.next().await.unwrap().unwrap();
+        let init_res = reader.next().await.unwrap()?;
         debug!("Thread port initialization message received");
         assert_eq!(init_res.chunk(), &1u8.to_le_bytes());
         let (write_tx, mut write_rx) = channel::<(u64, BytesMut)>(1);

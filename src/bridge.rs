@@ -13,6 +13,7 @@ use tokio::sync::mpsc::{self, channel, Sender};
 use tokio::sync::oneshot::{self, Receiver};
 use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
 
+use crate::server;
 use crate::utils::FRAME_CAPACITY;
 
 struct ServerConnection {
@@ -97,10 +98,13 @@ impl BridgeServers {
         stream: TcpStream,
         addr: SocketAddr,
     ) {
-        let server_conn = ServerConnection::new(serv_id, bridge, stream, addr).await;
-        info!("New server connection {:?}, id {}", addr, serv_id);
-        self.conns
-            .insert(&(serv_id as usize), Arc::new(server_conn));
+        if let Some(server_conn) = ServerConnection::new(serv_id, bridge, stream, addr).await {
+            info!("New server connection {:?}, id {}", addr, serv_id);
+            self.conns
+                .insert(&(serv_id as usize), Arc::new(server_conn));
+        } else {
+            error!("Cannot establish server connection with {} for {}", addr, serv_id);
+        }
     }
 
     fn remove(&self, serv_id: u64) {
@@ -111,26 +115,45 @@ impl BridgeServers {
 }
 
 impl ServerConnection {
-    async fn new(id: u64, bridge: &Arc<Bridge>, stream: TcpStream, addr: SocketAddr) -> Self {
-        let (sender, ports) = Self::init_connection(id, bridge, stream).await;
-        Self { id, sender, ports }
+    async fn new(
+        id: u64,
+        bridge: &Arc<Bridge>,
+        stream: TcpStream,
+        addr: SocketAddr,
+    ) -> Option<Self> {
+        Self::init_connection(id, bridge, stream)
+            .await
+            .map(|(sender, ports)| Self { id, sender, ports })
     }
 
     async fn init_connection(
         id: u64,
         bridge: &Arc<Bridge>,
         stream: TcpStream,
-    ) -> (Sender<(u32, u64, BytesMut)>, Vec<u32>) {
+    ) -> Option<(Sender<(u32, u64, BytesMut)>, Vec<u32>)> {
         let bridge = bridge.clone();
         let transport = Framed::with_capacity(stream, LengthDelimitedCodec::new(), FRAME_CAPACITY);
         let (mut writer, mut reader) = transport.split();
-        let mut num_ports_bytes = reader.next().await.unwrap().unwrap();
+        let mut num_ports_bytes = match reader.next().await {
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
+                error!(
+                    "Cannot process incomming server connection {}, reason: {:?}",
+                    id, e
+                );
+                return None;
+            }
+            None => {
+                error!("Cannot get incomming server connection {}", id);
+                return None;
+            }
+        };
         let mut num_ports_data = [0u8; 8];
         num_ports_bytes.copy_to_slice(&mut num_ports_data);
-        writer
-            .send(Bytes::copy_from_slice(&num_ports_data))
-            .await
-            .unwrap();
+        if let Err(e) = writer.send(Bytes::copy_from_slice(&num_ports_data)).await {
+            error!("Error on sending sending feedback: {:?}", e);
+            return None;
+        }
         let num_ports = u64::from_le_bytes(num_ports_data);
         trace!("Connection {} will have {} ports", id, num_ports);
         let mut ports = Vec::with_capacity(num_ports as usize);
@@ -211,7 +234,7 @@ impl ServerConnection {
             error!("Server {} disconnected", id);
             bridge.servs.remove(id);
         });
-        return (write_tx, ports);
+        return Some((write_tx, ports));
     }
 
     async fn close(&self) {
@@ -274,7 +297,10 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
             let transport = Framed::with_capacity(stream, BytesCodec::new(), FRAME_CAPACITY);
             let (mut writer, mut reader) = transport.split();
             tokio::spawn(async move {
-                debug!("Receving client packets from channel for conn {}, port {}", conn_id, port);
+                debug!(
+                    "Receving client packets from channel for conn {}, port {}",
+                    conn_id, port
+                );
                 while let Some(data) = client_rx.recv().await {
                     if data.remaining() > 0 {
                         trace!(
@@ -296,7 +322,10 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
             let bridge_clone = bridge.clone();
             let (serv_tx, mut serv_rx) = channel::<BytesMut>(1);
             tokio::spawn(async move {
-                debug!("Receving server packets from channel for conn {}, port {}", conn_id, port);
+                debug!(
+                    "Receving server packets from channel for conn {}, port {}",
+                    conn_id, port
+                );
                 while let (Some(res), Some(serv_id)) = (
                     serv_rx.recv().await,
                     bridge_clone.ports.servs.get(&(port as usize)),
@@ -326,13 +355,19 @@ async fn init_client_server(port: u32, bridge: &Arc<Bridge>) -> io::Result<()> {
                     serv_tx.send(res).await.unwrap();
                 }
             }
-            debug!("Send empty packet for termination, conn {} at port {} from {:?}", conn_id, port, addr);
+            debug!(
+                "Send empty packet for termination, conn {} at port {} from {:?}",
+                conn_id, port, addr
+            );
             let _ = serv_tx.send(BytesMut::new()).await;
             let cc = bridge.clients.remove(&(conn_id as usize));
             if let Some(cc) = cc {
                 let _ = cc.tx.send(BytesMut::new()).await;
             }
-            info!("Connection {} of port {} from {:?} disconnected", conn_id, port, addr);
+            info!(
+                "Connection {} of port {} from {:?} disconnected",
+                conn_id, port, addr
+            );
         });
     }
     warn!("Client server ended for port {}", port);
