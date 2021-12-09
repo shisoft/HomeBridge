@@ -59,7 +59,9 @@ impl Server {
         let ports = ports.clone();
         tokio::spawn(async move {
             loop {
-                let _ = Self::start_thread(&conns, &ports, &bridge).await;
+                if let Err(e) = Self::start_thread(&conns, &ports, &bridge).await {
+                    warn!("Bridge offline with {}", e);
+                }
                 conns.entries().into_iter().for_each(|(id, conn)| {
                     tokio::spawn(async move {
                         // Send empty to close the connection
@@ -103,7 +105,7 @@ impl Server {
                     error!("Cannot send port {}, error {}", dest, e);
                 }
             }
-            writer.flush().await.unwrap();
+            writer.flush().await?;
             trace!("Sent port {}", dest);
         }
         debug!("Reading thread port initialization message");
