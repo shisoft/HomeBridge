@@ -26,7 +26,7 @@ pub struct Connection {
     recv_pkt: Arc<AtomicUsize>,
     sent_pkt: Arc<AtomicUsize>,
     last_act: Arc<AtomicU64>,
-    outgoing_tx: Arc<Sender<(u64, BytesMut)>>,
+    outgoing_tx: Sender<(u64, BytesMut)>,
     host_tx: Sender<Bytes>,
     host_rx: RefCell<Option<Receiver<Bytes>>>,
     act: AtomicBool,
@@ -128,15 +128,13 @@ impl Server {
                 writer.flush().await.unwrap();
             }
             let _r = writer.close().await;
-            warn!(
-                "Bridge disconnected due to channel closed"
-            );
+            warn!("Bridge disconnected due to channel closed");
         });
         let rev_port = ports
             .iter()
             .map(|(src, dest)| (*dest, *src))
             .collect::<HashMap<_, _>>();
-        let out = Arc::new(write_tx);
+        let out = write_tx;
         while let Some(res) = reader.next().await {
             if let Ok(mut data) = res {
                 let dest_port = data.get_u32_le();
@@ -169,9 +167,15 @@ impl Server {
                     ))
                 });
                 connection.activate().await;
+                let channel_closed = || {
+                    conns.remove(&(conn_id as usize));
+                    debug!("Closed connection for conn {}, port {}", conn_id, dest_port);
+                };
                 if data.remaining() > 0 {
                     if let Err(e) = connection.host_tx.send(data.freeze()).await {
-                        error!("Cannot send data to channel for conn {}, port {}, error: {:?}", conn_id, dest_port, e);
+                        error!("Cannot send data to channel for conn {}, port {}, host channel closed {}, error: {:?}", conn_id, dest_port, connection.host_tx.is_closed(), e);
+                        channel_closed();
+                        break;
                     }
                 } else {
                     debug!(
@@ -179,10 +183,10 @@ impl Server {
                         conn_id, dest_port
                     );
                     if let Err(e) = connection.host_tx.send(data.freeze()).await {
-                        error!("Cannot send close instruction to channel for conn {}, port {}, error: {:?}", conn_id, dest_port, e)
+                        error!("Cannot send close instruction to channel for conn {}, port {}, host channel closed {}, error: {:?}", conn_id, dest_port, connection.host_tx.is_closed(), e);
                     }
-                    conns.remove(&(conn_id as usize));
-                    debug!("Closed connection for conn {}, port {}", conn_id, dest_port);
+                    channel_closed();
+                    break;
                 }
             }
         }
@@ -195,7 +199,7 @@ impl Connection {
     pub fn new(
         id: u64,
         port: u32,
-        outgoing_tx: Arc<Sender<(u64, BytesMut)>>,
+        outgoing_tx: Sender<(u64, BytesMut)>,
         conn_map: ConnMap,
     ) -> Self {
         let (host_tx, host_rx) = channel::<Bytes>(1);
@@ -234,7 +238,7 @@ impl Connection {
         let out = self.outgoing_tx.clone();
         let port = self.port;
         let id = self.id;
-        let mut host_rx = mem::replace(&mut*self.host_rx.borrow_mut(), None).unwrap();
+        let mut host_rx = mem::replace(&mut *self.host_rx.borrow_mut(), None).unwrap();
         debug!("Activating server client {}", self.id);
         let socket = TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
