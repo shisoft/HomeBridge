@@ -249,20 +249,25 @@ impl Connection {
             while let Some(data) = host_rx.recv().await {
                 let len = data.len();
                 if len == 0 {
-                    trace!("Received host connection close packet for {}", id);
+                    trace!("Received host connection close packet for conn {}", id);
                     host_rx.close();
                     break;
                 }
                 match writer.send(data).await {
                     Ok(_) => {
-                        trace!("Sent packet with length of {} to {}", len, port);
+                        trace!(
+                            "Sent packet with length of {} to {} for conn {}",
+                            len,
+                            port,
+                            id
+                        );
                         sent_pkt_c.fetch_add(1, Ordering::Relaxed);
                         last_act_c1.store(unix_timestamp(), Ordering::Relaxed);
                     }
                     Err(e) => {
                         error!(
-                            "Failing to send packet with length of {} to {}, {:?}",
-                            len, port, e
+                            "Failing to send packet with length of {} to {} for conn {}, {:?}",
+                            len, port, e, id
                         )
                     }
                 }
@@ -274,7 +279,7 @@ impl Connection {
                 );
             };
             conn_map2.remove(&(id as usize));
-            info!("Connection closed for {}, port {}", id, port);
+            info!("Connection closed for conn {}, port {}", id, port);
         });
         tokio::spawn(async move {
             loop {
