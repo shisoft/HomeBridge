@@ -168,7 +168,7 @@ impl Server {
                 });
                 connection.activate().await;
                 let channel_closed = || {
-                    conns.remove(&(conn_id as usize));
+                    conns.remove(&(conn_id as usize)); // TODO: use clear
                     debug!("Closed connection for conn {}, port {}", conn_id, dest_port);
                 };
                 if data.remaining() > 0 {
@@ -184,9 +184,9 @@ impl Server {
                     );
                     if let Err(e) = connection.host_tx.send(data.freeze()).await {
                         error!("Cannot send close instruction to channel for conn {}, port {}, host channel closed {}, error: {:?}", conn_id, dest_port, connection.host_tx.is_closed(), e);
+                        channel_closed();
+                        break;
                     }
-                    channel_closed();
-                    break;
                 }
             }
         }
