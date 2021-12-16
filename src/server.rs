@@ -59,6 +59,7 @@ impl Server {
         let ports = ports.clone();
         tokio::spawn(async move {
             loop {
+                conns.clear();
                 if let Err(e) = Self::start_thread(&conns, &ports, &bridge).await {
                     warn!("Bridge offline with {}", e);
                 }

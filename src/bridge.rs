@@ -6,14 +6,11 @@ use log::*;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{atomic::AtomicU64, Arc};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, channel, Sender};
-use tokio::sync::oneshot::{self, Receiver};
 use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
 
-use crate::server;
 use crate::utils::FRAME_CAPACITY;
 
 struct ServerConnection {
@@ -98,9 +95,6 @@ impl BridgeServers {
         stream: TcpStream,
         addr: SocketAddr,
     ) {
-        bridge.clients.clear();
-        bridge.ports.servs.clear();
-        beidge.servs.clear();
         if let Some(server_conn) = ServerConnection::new(serv_id, bridge, stream, addr).await {
             info!("New server connection {:?}, id {}", addr, serv_id);
             self.conns
