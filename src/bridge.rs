@@ -98,6 +98,9 @@ impl BridgeServers {
         stream: TcpStream,
         addr: SocketAddr,
     ) {
+        bridge.clients.clear();
+        bridge.ports.servs.clear();
+        beidge.servs.clear();
         if let Some(server_conn) = ServerConnection::new(serv_id, bridge, stream, addr).await {
             info!("New server connection {:?}, id {}", addr, serv_id);
             self.conns
